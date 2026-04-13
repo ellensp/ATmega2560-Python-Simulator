@@ -1,0 +1,93 @@
+ATmega2560 Python Simulator Development Notes
+Updated: 2026-04-14
+
+Goal
+- Build an ATmega2560 simulator in Python with broad instruction coverage, practical firmware execution support, and improving timing/peripheral fidelity.
+- Primary references: AVR Instruction Set Manual (DS40002198) and ATmega640/1280/1281/2560/2561 datasheet (DS40002211A).
+
+Current Summary
+- Runtime support policy:
+  - CPython support has been dropped for this project; simulator execution is now PyPy-only.
+  - The supported local runtime path is `.venv-pypy310/bin/python`.
+- Code organization:
+  - The emulator core is now split into logical modules while preserving `from sim import ATmega2560Emulator` as the public entry point.
+  - Current module layout: `sim.py` (composition + execute loop), `sim_constants.py`, `sim_alu.py`, `sim_decode.py`, `sim_gpio.py`, `sim_memory.py`, `sim_interrupts.py`, `sim_peripherals.py`, and `sim_peripherals_ctrl.py`.
+  - `sim.py` remains the stable import surface; `DisassemblyLine` is defined in `sim_decode.py` and re-exported from `sim.py` for compatibility with existing tooling.
+- CPU core:
+  - Word-addressed PC/flash model and 3-byte return-address stack behavior for ATmega2560 class program space.
+  - Fixed a split-module regression in stack helpers so CALL/RCALL/ICALL/EICALL and interrupt entry/exit now preserve full ATmega2560 return addresses (3-byte PC stack entries), preventing upper-flash return truncation and false control-flow loops in large firmware.
+  - Corrected AVR stack byte semantics to post-decrement `PUSH` / pre-increment `POP`, matching real frame layout used by avr-gcc prologues (including `RCALL .+0` frame allocation patterns) and preventing latent stack-frame corruption in long Marlin runs.
+  - Added SEI interrupt-acceptance deferral (interrupts begin after the following instruction), matching AVR timing semantics.
+  - Broad integer, bit, branch/skip, call/jump, load/store, and program-memory instruction coverage.
+  - Branch alias decode output implemented (for example `BREQ/BRNE`, `BRCS/BRCC`, `BRMI/BRPL`, `BRVS/BRVC`, `BRLT/BRGE`, `BRHS/BRHC`, `BRTS/BRTC`, `BRIE/BRID`).
+  - ATmega2560 non-applicable opcodes are tracked as `n/a`: `DAA`, `DES`.
+- Memory and peripherals:
+  - Data-space guards and AVR I/O mapping in place.
+  - Digital I/O baseline now includes pull-up-aware input reads, explicit external-drive release back to floating/high-Z input state, `PINx` write-to-toggle `PORTx` behavior, and alternate-function pin ownership for shared peripheral pins (USART TX idle-high with start-bit low during active TX, SPI SCK toggling between idle-CPOL and active levels with in-progress MOSI bit tracking, TWI SCL driven low during operations and released high when idle, and TWI SDA driven low for `START` condition).
+  - Timer0 baseline (overflow, compare A/B, CTC), interrupt dispatch, and `RETI` behavior implemented.
+  - Timer1 baseline implemented (`TCNT1` counting, `OCF1A/B/C` + `TOV1`, `ICR1` capture latch/flag baseline, basic CTC-on-`OCR1A`, and CAPT/COMPA/COMPB/COMPC/OVF interrupt dispatch).
+  - Timer2 baseline includes synchronous modes plus async clock baseline (`ASSR.AS2` scaled clock domain), with `OCF2A/B` + `TOV2` and COMPA/COMPB/OVF interrupt dispatch.
+  - Timer3 baseline implemented (`TCNT3` counting, `OCF3A/B/C` + `TOV3`, `ICR3` capture latch/flag baseline, basic CTC-on-`OCR3A`, and CAPT/COMPA/COMPB/COMPC/OVF interrupt dispatch).
+  - Timer4 baseline implemented (`TCNT4` counting, `OCF4A/B/C` + `TOV4`, `ICR4` capture latch/flag baseline, basic CTC-on-`OCR4A`, and CAPT/COMPA/COMPB/COMPC/OVF interrupt dispatch).
+  - Timer5 baseline implemented (`TCNT5` counting, `OCF5A/B/C` + `TOV5`, `ICR5` capture latch/flag baseline, basic CTC-on-`OCR5A`, and CAPT/COMPA/COMPB/COMPC/OVF interrupt dispatch).
+  - Watchdog baseline implemented (`WDTCSR` timed config window, timeout prescaler, interrupt/reset/combined modes, `WDR` interaction, and `MCUSR.WDRF` reset-cause behavior).
+  - Watchdog timeout base was updated to realistic ATmega2560 scale (~16 ms minimum at 16 MHz, 256000 cycles), reducing unrealistic frequent watchdog reset storms seen in large firmware runs.
+  - EEPROM controller baseline implemented for internal 4 KB EEPROM (`EEARH/L`, `EEDR`, `EECR` with `EERE/EEPE/EEMPE/EERIE`, timed write-start window, write completion progression, and EEPROM ready interrupt dispatch baseline).
+  - Pin-change interrupt baseline implemented (`PCICR`, `PCIFR`, `PCMSK0..2`, PCINT0/1/2 vector dispatch, and write-one-to-clear flag behavior).
+  - Interrupt vector constants were corrected to true ATmega2560 `__vector_N` slot word addresses (`word = 2 * N` for 4-byte table entries), fixing invalid odd-PC ISR jumps and restoring correct dispatch for sources such as `USART0_RX` (`__vector_25`).
+  - External interrupt baseline expanded to `INT0..INT7` (`EICRA/EICRB` mode decode, `EIFR/EIMSK` flag/enable behavior, and vector-priority dispatch).
+  - ADC controller baseline implemented (`ADMUX`, `ADCSRA`, `ADCSRB`, `ADCH`, `ADCL`) with conversion progression, right/left adjusted result formatting, and ADC interrupt dispatch.
+  - Analog comparator baseline implemented (`ACSR`) with comparator output/flag behavior, interrupt dispatch, internal bandgap positive-input selection baseline, and Timer1 capture routing via `ACIC`.
+  - SPI controller baseline implemented (`SPCR`, `SPSR`, `SPDR`) with master transfer progression, queued slave-response injection for tests, transfer-complete flag behavior, write-collision handling, and interrupt dispatch.
+  - TWI/I2C controller baseline implemented (`TWBR`, `TWSR`, `TWAR`, `TWDR`, `TWCR`, `TWAMR`) with master start/address/data progression, queued read-byte injection for tests, status-code progression, stop handling, and interrupt dispatch.
+  - USART0..USART3 TX/RX baseline implemented.
+  - `run_hex.py` includes a TCP UART bridge baseline for USART0..USART3 with host RX injection, TX streaming, reconnect support, simple monitor-style text/file injection, and bridge-level integration tests.
+- Tooling:
+  - Added `gui.py` desktop control panel (Tk) with top control bar (`Load`, `Run/Stop`, `Step`, `Restart`, `Profile`, GUI update-rate slider), left/right pane mode selectors, and bottom cycle/reset counters.
+  - GUI right pane now includes an `ADC` mode with per-channel `ADC0..ADC15` sliders (`0..1023`) that drive emulator ADC input values; sliders are enabled only when ADC is enabled and the mapped pin is configured as input (not DDR output).
+  - GUI UART view now uses a single selectable `USART0..USART3` panel (instead of four stacked panes), with per-UART send controls and status bits.
+  - GUI left pane now supports `FLASH` (`Disassembly`/`Raw`), `RAM`, `EEPROM`, and `Profile` modes.
+  - Profile mode now renders per-address heatmaps for RAM/FLASH/EEPROM, with hover stats (`total`, `reads`, `writes`) and adaptive FLASH sparse rendering to keep step latency practical on large firmware images.
+  - Profile click-through navigation is implemented: clicking a profile cell opens disassembly/hex at the matching address; pressing `Profile` returns to the remembered profile address.
+  - Destination rows opened from profile keep a persistent highlight matching the profile heat color until `Profile` is pressed again.
+  - `gui.py` now accepts startup ADC arguments like `--adc 0=512 --adc ADC3=900` and compact forms like `--adc 0=512,ADC3=900` to seed slider values from the command line; staged values persist in the GUI even while a channel is currently inactive and apply automatically once ADC/pin mode permits it.
+  - UART send controls in GUI now include per-UART `CR` and `LF` append checkboxes; transmit payload appends selected terminator(s) (`\r`, `\n`, or both).
+  - `examples/uart_relay/uart_relay.c` now relays all received bytes immediately (no CR/LF line-termination gate) and escapes control characters in relay text output (for example `\\r`, `\\n`).
+  - GUI memory-view refresh now preserves scroll position while staying in the same left-pane mode (including RAM view during step-mode updates).
+  - GUI startup/load flow now auto-detects a sibling `.elf` for loaded `.hex/.hx` firmware and overlays symbol labels in disassembly when `avr-nm` is available.
+  - Added emulator reset diagnostics counters (`reset_count`, `watchdog_reset_count`, and persistent `total_cycles`) and surfaced them in GUI bottom status to distinguish real MCU resets from display artifacts when cycle counts drop.
+  - GUI disassembly now rewrites control-flow targets (`BR*`, `RJMP/RCALL`, `JMP/CALL`) to show a single best symbol name plus raw address context when a matching ELF label exists (for example `BRNE loop ; 0x00123`), preferring strong text symbols over weak aliases; standalone `label:` rows are shown and PC-centered positioning now uses direct label-aware line centering with a symmetric PC context window so stop/idle alignment stays centered.
+  - Toggling breakpoints in stopped disassembly view now preserves the current loaded disassembly slice and scroll position instead of forcing an immediate recenter on the PC.
+  - GUI now auto-generates fallback labels (for example `loc_00C8F`) for control-flow targets that have no ELF symbol, so branch/jump destinations still get named labels.
+  - GUI disassembly decode is now buffered via a lazy cache: decoded rows are reused across refreshes and extended on demand for missing ranges/chunks in both scroll directions, including prepending earlier rows when the user scrolls upward; lazy extension is suspended during full disassembly rebuild/centering so Stop/idle recentering is not disturbed by scroll callbacks.
+  - Top-level example build now explicitly generates and retains both `.elf` and `.hex` artifacts for each `examples/*/*.c` firmware.
+  - Added GUI-facing simulator APIs exposed through `sim.py`: `load_program_file()` for `.hex/.hx/.bin`, `snapshot_state()` for register/flag snapshots, and `disassemble_window()` for PC-centered byte/disassembly listings.
+  - Intel HEX loader and run harness (`run_hex.py`) with verbose and visual modes.
+  - Opcode test harness (`opcode_tester.py`) supports initial-state setup and expected-state assertions, including expected last decoded instruction text.
+  - Opcode tester matrix coverage now includes implemented decode forms across arithmetic/logic, branch/skip, control-flow (`RJMP/RCALL/JMP/CALL/IJMP/ICALL/EIJMP/EICALL/RET/RETI`), memory (`LDS/STS`, `LD/ST` direct + pre/post for `X/Y/Z`, `LDD/STD`, `LPM/ELPM` forms), bit/flag operations, multiply variants, and branch-alias decode checks (`BREQ/BRNE`, `BRCS/BRCC`, `BRMI/BRPL`, `BRVS/BRVC`, `BRLT/BRGE`, `BRHS/BRHC`, `BRTS/BRTC`, `BRIE/BRID`).
+  - Build/run workflow includes an 11-example firmware suite under `examples/` (`blink`, `hello_world`, `fibonacci_uart`, `primes_uart`, `counter_uart`, `gpio_chaser`, `timer0_tick_uart`, `adc_poll`, `spi_master_loop`, `eeprom_rw`, `uart_relay`) for broad simulator smoke/regression checks.
+  - Added `examples/uart0_rx_isr/uart0_rx_isr.c`, a USART0 receive-interrupt example that enables `USART0_RX_vect`, buffers RX bytes in a small ring buffer, and prints `received {...}` for each received byte, with regression coverage in `tests/test_examples_firmware.py`.
+  - Runtime profiling/optimization pass completed for `examples/fibonacci_uart/fibonacci_uart.hex`: UART bridge polling was throttled in `run_hex.py`, GPIO alternate-pin / PCINT flag recomputation now uses cached signatures + dirty checks, and `step()` now avoids unconditional GPIO override refresh (it refreshes only when UART TX active-state changes).
+  - Completed subsystems now considered baseline (no longer active TODO tracks): Timer0..Timer5 mode/interrupt coverage (including cross-timer priority), UART bridge/monitor path (`USART0..USART3`), watchdog behavior and reset-cause handling, ISR entry/exit/arbitration/nesting validation, and the current opcode-matrix focus items.
+
+Validation Status
+- Current full `unittest` discovery run: `231` tests total, `3` known failures (`test_hex_loader.TestHexLoader.test_load_data_and_eof` and `test_opcode_tester.TestOpcodeTesterMatrix.test_matrix_registers_flags_and_cycles` cases `41` and `42`).
+- Long-window emulator runs on common `avr-gcc` outputs (`examples/blink/blink.hex`, `examples/blink/blink_sim.hex`) completed without `NotImplementedError` over 2,000,000 steps.
+- Runtime benchmark note: PyPy 3.10 shows clear simulator speedups on this workload (about 2x for 200k-step short runs and about 6x for 1M-step long runs compared to prior CPython baseline measurements).
+- Profile reference (`fibonacci_uart.hex`, 200000 steps, bridge enabled): `8.108s` before bridge optimization, `5.625s` after bridge polling fix, `4.331s` after GPIO/PCINT dirty/signature gating.
+- Core simulation profile reference (`fibonacci_uart.hex`, 200000 steps, no bridge): `5.263s` baseline, `3.997s` after conditional step refresh pass, `3.186s` after low-overhead UART-state check refinement.
+
+Open Work
+- [ ] Exit criterion: keep this notes file synchronized with actual decode/execute coverage across the split simulator modules.
+- [ ] Ongoing fidelity work: improve cycle and peripheral timing realism where hardware-level edge behavior matters.
+
+Peripheral Expansion TODO (From ATmega2560 Hardware Blocks)
+- [ ] Digital I/O completeness: baseline now covers pull-up-aware input reads, explicit floating/high-Z pin release, `PINx` write-to-toggle `PORTx` semantics, alternate-function ownership with per-cycle SCK/MOSI waveform tracking for SPI, SCL idle/active drive for TWI, and start-bit low for UART TX; remaining work is sub-bit timing accuracy and deeper electrical per-port nuances.
+
+EEPROM Controller TODO
+- [ ] Ongoing fidelity work: refine EEPROM timing/mode nuances (`EEPM1:0`) and edge interactions to match datasheet-level behavior.
+
+Reference Notes
+- Keep PC word-addressed internally.
+- Preserve `Z` semantics for `SBC`/`SBCI` carry-chain behavior.
+- Keep unsupported/unknown opcode behavior explicit via `NotImplementedError`.
