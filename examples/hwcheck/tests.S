@@ -537,6 +537,12 @@ t_txc:
   ret
 .global USART0_TX_vect
 USART0_TX_vect:
+  push r24
+  lds r24, TCNT1L
+  sts isr16, r24
+  lds r24, TCNT1H
+  sts isr16+1, r24
+  pop r24
   reti
 
 ; Interrupt latency with a sled of 2-cycle instructions; compare value in r24.
@@ -580,4 +586,659 @@ t_irq_lat3:
   sts TIMSK1, r1
   lds r24, isr_val
   sub r24, r19
+  ret
+
+; ---- third batch ----
+.section .bss
+.global last_tifr, isr16
+last_tifr: .byte 0
+isr16:     .byte 0, 0
+.section .text
+
+; Idle sleep woken by Timer1 compare B: ISR sample minus the compare value.
+.global t_sleep_idle
+t_sleep_idle:
+  call t1_start
+  ldi r18, 40
+  sts OCR1BH, r1
+  sts OCR1BL, r18
+  ldi r18, 0x2F
+  out IO(TIFR1), r18
+  ldi r18, (1<<OCIE1B)
+  sts TIMSK1, r18
+  ldi r18, (1<<SE)
+  out IO(SMCR), r18
+  sei
+  sleep
+  NOPS 8
+  cli
+  out IO(SMCR), r1
+  sts TIMSK1, r1
+  lds r24, isr_val
+  subi r24, 40
+  ret
+
+; SLEEP with SE clear: cycles.
+MEAS_BEGIN t_sleep_nose
+  sleep
+MEAS_END
+
+; Timer1 in a given mode: r24 = TCCR1A, r22 = TCCR1B mode bits, r20 = TOP (ICR1 and OCR1A),
+; r18 = delay loops. OCR1B = 20. Returns TCNT1L after the delay; TIFR1 goes to last_tifr.
+.global t_t1mode
+t_t1mode:
+  sts TCCR1B, r1
+  sts TCCR1A, r1
+  sts TIMSK1, r1
+  sts OCR1AH, r1
+  sts OCR1AL, r20
+  ldi r19, 20
+  sts OCR1BH, r1
+  sts OCR1BL, r19
+  sts TCCR1A, r24
+  sts TCCR1B, r22
+  sts ICR1H, r1
+  sts ICR1L, r20
+  sts TCNT1H, r1
+  sts TCNT1L, r1
+  ldi r19, 0x2F
+  out IO(TIFR1), r19
+  ori r22, 1
+  sts TCCR1B, r22
+1: dec r18
+  brne 1b
+  sts TCCR1B, r1
+  lds r24, TCNT1L
+  lds r25, TCNT1H
+  in r19, IO(TIFR1)
+  sts last_tifr, r19
+  sts TCCR1A, r1
+  ldi r19, 0x2F
+  out IO(TIFR1), r19
+  ret
+
+; ICR1L read back after a write in normal mode (0x55 written).
+.global t_icr_normal
+t_icr_normal:
+  sts TCCR1B, r1
+  sts TCCR1A, r1
+  ldi r18, 0x55
+  sts ICR1H, r1
+  sts ICR1L, r18
+  lds r24, ICR1L
+  lds r25, ICR1H
+  ret
+
+; Interrupt latency of compare B in 8-bit phase-correct PWM (mode 1), counting up.
+.global t_irq_lat_pc
+t_irq_lat_pc:
+  sts TCCR1B, r1
+  sts TCCR1A, r1
+  sts TIMSK1, r1
+  ldi r18, 40
+  sts OCR1BH, r1
+  sts OCR1BL, r18
+  sts TCNT1H, r1
+  sts TCNT1L, r1
+  ldi r18, (1<<WGM10)
+  sts TCCR1A, r18
+  ldi r18, 0x2F
+  out IO(TIFR1), r18
+  ldi r18, (1<<OCIE1B)
+  sts TIMSK1, r18
+  ldi r18, 1
+  sts TCCR1B, r18
+  sei
+  NOPS 60
+  cli
+  sts TIMSK1, r1
+  sts TCCR1B, r1
+  sts TCCR1A, r1
+  lds r24, isr_val
+  subi r24, 40
+  ret
+
+; Prescaler reset (GTCCR.PSRSYNC), r24 = 0..8 cycles later start Timer0 at clk/8,
+; read TCNT0 after 20 more cycles.
+.global t_presc
+t_presc:
+  out IO(TCCR0B), r1
+  out IO(TCCR0A), r1
+  out IO(TCNT0), r1
+  ldi r30, pm_lo8(presc_sled_end)
+  ldi r31, pm_hi8(presc_sled_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r18, (1<<PSRSYNC)
+  ldi r19, 2
+  out IO(GTCCR), r18
+  ijmp
+  NOPS 8
+presc_sled_end:
+  out IO(TCCR0B), r19
+  NOPS 20
+  in r24, IO(TCNT0)
+  out IO(TCCR0B), r1
+  ldi r18, 7
+  out IO(TIFR0), r18
+  ret
+
+; EEPROM read strobe: cycles of SBI EECR,EERE.
+.global t_eere
+t_eere:
+  ldi r18, 0x0F
+  out IO(EEARH), r18
+  ldi r18, 0xFF
+  out IO(EEARL), r18
+  call t1_start
+  lds r24, TCNT1L
+  sbi IO(EECR), EERE
+MEAS_END
+
+; EEPROM write of 0xA5 to the last cell: cycles of SBI EEMPE + SBI EEPE.
+.global t_eepe
+t_eepe:
+  ldi r18, 0x0F
+  out IO(EEARH), r18
+  ldi r18, 0xFF
+  out IO(EEARL), r18
+  ldi r18, 0xA5
+  out IO(EEDR), r18
+  out IO(EECR), r1
+  call t1_start
+  lds r24, TCNT1L
+  sbi IO(EECR), EEMPE
+  sbi IO(EECR), EEPE
+  lds r25, TCNT1L
+  sub r25, r24
+  mov r24, r25
+1: sbic IO(EECR), EEPE
+  rjmp 1b
+  ret
+
+; EEDR after reading the cell back.
+.global t_eeread_val
+t_eeread_val:
+  sbi IO(EECR), EERE
+  in r24, IO(EEDR)
+  ret
+
+; SPIF sampled 3*n + k - 1 cycles after the SPDR write. r24 = SPCR, r22 = SPSR, r20 = n.
+.macro SPI_DONE name, k
+.global \name
+\name:
+  sbi IO(PORTB), 0
+  NOPS 200
+  out IO(SPCR), r24
+  out IO(SPSR), r22
+  in r19, IO(SPSR)
+  in r19, IO(SPDR)
+  ldi r19, 0xA5
+  out IO(SPDR), r19
+1: dec r20
+  brne 1b
+  NOPS \k
+  in r24, IO(SPSR)
+  andi r24, 0x80
+2: in r19, IO(SPSR)
+  sbrs r19, SPIF
+  rjmp 2b
+  in r19, IO(SPDR)
+  out IO(SPCR), r1
+  out IO(SPSR), r1
+  cbi IO(PORTB), 0
+  ret
+.endm
+SPI_DONE t_spi_done0, 0
+SPI_DONE t_spi_done1, 1
+SPI_DONE t_spi_done2, 2
+
+; USART0: cycles from the UDR0 write to the TX-complete interrupt (sends a newline).
+; r24 = delay loops before the write.
+.global t_uart_frame
+t_uart_frame:
+  push r20
+  mov r20, r24
+  ldi r19, 16
+2: ldi r18, 250
+1: dec r18
+  brne 1b
+  dec r19
+  brne 2b
+  lds r18, UCSR0A
+  ori r18, (1<<TXC0)
+  sts UCSR0A, r18
+  call t1_start
+  lds r18, UCSR0B
+  ori r18, (1<<TXCIE0)
+  sts UCSR0B, r18
+3: dec r20
+  brne 3b
+  ldi r18, 0x0A
+  sei
+  lds r24, TCNT1L
+  lds r25, TCNT1H
+  sts UDR0, r18
+  ldi r19, 16
+5: ldi r18, 250
+4: dec r18
+  brne 4b
+  dec r19
+  brne 5b
+  cli
+  lds r18, UCSR0B
+  andi r18, ~(1<<TXCIE0)
+  sts UCSR0B, r18
+  lds r18, isr16
+  lds r19, isr16+1
+  sub r18, r24
+  sbc r19, r25
+  movw r24, r18
+  pop r20
+  ret
+
+; Like t_presc, but TCNT0 is read after 11 cycles (one clk/8 tick, or two if the
+; prescaler phase is not tied to the timer start).
+.global t_presc_b
+t_presc_b:
+  out IO(TCCR0B), r1
+  out IO(TCCR0A), r1
+  out IO(TCNT0), r1
+  ldi r30, pm_lo8(presc_b_end)
+  ldi r31, pm_hi8(presc_b_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r18, (1<<PSRSYNC)
+  ldi r19, 2
+  out IO(GTCCR), r18
+  ijmp
+  NOPS 8
+presc_b_end:
+  out IO(TCCR0B), r19
+  NOPS 11
+  in r24, IO(TCNT0)
+  out IO(TCCR0B), r1
+  ldi r18, 7
+  out IO(TIFR0), r18
+  ret
+
+; The same without touching GTCCR: prescaler left free-running.
+.global t_presc_c
+t_presc_c:
+  out IO(TCCR0B), r1
+  out IO(TCCR0A), r1
+  out IO(TCNT0), r1
+  ldi r30, pm_lo8(presc_c_end)
+  ldi r31, pm_hi8(presc_c_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r19, 2
+  ijmp
+  NOPS 8
+presc_c_end:
+  out IO(TCCR0B), r19
+  NOPS 11
+  in r24, IO(TCNT0)
+  out IO(TCCR0B), r1
+  ldi r18, 7
+  out IO(TIFR0), r18
+  ret
+
+; USART0 idle: cycles from the UDR0 write to the data-register-empty interrupt.
+.global t_uart_udre
+t_uart_udre:
+  push r20
+  mov r20, r24
+  ldi r19, 16
+2: ldi r18, 250
+1: dec r18
+  brne 1b
+  dec r19
+  brne 2b
+  call t1_start
+3: dec r20
+  brne 3b
+  ldi r18, 0x0A
+  lds r19, UCSR0B
+  ori r19, (1<<UDRIE0)
+  lds r24, TCNT1L
+  lds r25, TCNT1H
+  sts UDR0, r18
+  sts UCSR0B, r19
+  sei
+  NOPS 40
+  cli
+  lds r18, isr16
+  lds r19, isr16+1
+  sub r18, r24
+  sbc r19, r25
+  movw r24, r18
+  pop r20
+  ret
+
+.global USART0_UDRE_vect
+USART0_UDRE_vect:
+  push r24
+  lds r24, TCNT1L
+  sts isr16, r24
+  lds r24, TCNT1H
+  sts isr16+1, r24
+  in r24, IO(SREG)
+  push r24
+  lds r24, UCSR0B
+  andi r24, ~(1<<UDRIE0)
+  sts UCSR0B, r24
+  pop r24
+  out IO(SREG), r24
+  pop r24
+  reti
+
+; Like t_presc_b with 40 more cycles between the prescaler reset and the timer start.
+.global t_presc_d
+t_presc_d:
+  out IO(TCCR0B), r1
+  out IO(TCCR0A), r1
+  out IO(TCNT0), r1
+  ldi r30, pm_lo8(presc_d_end)
+  ldi r31, pm_hi8(presc_d_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r18, (1<<PSRSYNC)
+  ldi r19, 2
+  out IO(GTCCR), r18
+  NOPS 40
+  ijmp
+  NOPS 8
+presc_d_end:
+  out IO(TCCR0B), r19
+  NOPS 11
+  in r24, IO(TCNT0)
+  out IO(TCCR0B), r1
+  ldi r18, 7
+  out IO(TIFR0), r18
+  ret
+
+; GTCCR read back right after writing PSRSYNC.
+.global t_gtccr
+t_gtccr:
+  ldi r18, (1<<PSRSYNC)
+  out IO(GTCCR), r18
+  in r24, IO(GTCCR)
+  ret
+
+; Timer0 at clk/8 already running (prescaler free-running, all other timers stopped):
+; stop it r24 cycles after a tick was seen, restart at once, read TCNT0 11 cycles later.
+.global t_presc_e
+t_presc_e:
+  sts TCCR1B, r1
+  out IO(TCCR0A), r1
+  out IO(TCNT0), r1
+  ldi r30, pm_lo8(presc_e_end)
+  ldi r31, pm_hi8(presc_e_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r19, 2
+  out IO(TCCR0B), r19
+  in r18, IO(TCNT0)
+1: in r25, IO(TCNT0)
+  cp r25, r18
+  breq 1b
+  ijmp
+  NOPS 8
+presc_e_end:
+  out IO(TCCR0B), r1
+  out IO(TCNT0), r1
+  out IO(TCCR0B), r19
+  NOPS 11
+  in r24, IO(TCNT0)
+  out IO(TCCR0B), r1
+  ldi r18, 7
+  out IO(TIFR0), r18
+  ret
+
+; Like t_uart_frame, with exactly r24 (0..47) extra cycles before the UDR0 write
+; and a fixed length otherwise.
+.global t_uart_frame2
+t_uart_frame2:
+  ldi r30, pm_lo8(uf2_sled_end)
+  ldi r31, pm_hi8(uf2_sled_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r19, 16
+2: ldi r18, 250
+1: dec r18
+  brne 1b
+  dec r19
+  brne 2b
+  lds r18, UCSR0A
+  ori r18, (1<<TXC0)
+  sts UCSR0A, r18
+  call t1_start
+  lds r18, UCSR0B
+  ori r18, (1<<TXCIE0)
+  sts UCSR0B, r18
+  ldi r18, 0x0A
+  sei
+  ijmp
+  NOPS 48
+uf2_sled_end:
+  lds r24, TCNT1L
+  lds r25, TCNT1H
+  sts UDR0, r18
+  ldi r19, 16
+5: ldi r18, 250
+4: dec r18
+  brne 4b
+  dec r19
+  brne 5b
+  cli
+  lds r18, UCSR0B
+  andi r18, ~(1<<TXCIE0)
+  sts UCSR0B, r18
+  lds r18, isr16
+  lds r19, isr16+1
+  sub r18, r24
+  sbc r19, r25
+  movw r24, r18
+  ret
+
+; Two bytes written back to back: cycles from the first UDR0 write to the
+; data-register-empty interrupt (when the second byte moves to the shift register).
+; r24 = 0..47 extra cycles before the first write.
+.global t_uart_udre2
+t_uart_udre2:
+  ldi r30, pm_lo8(uq_sled_end)
+  ldi r31, pm_hi8(uq_sled_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r19, 16
+2: ldi r18, 250
+1: dec r18
+  brne 1b
+  dec r19
+  brne 2b
+  call t1_start
+  ldi r18, 0x0A
+  lds r19, UCSR0B
+  ori r19, (1<<UDRIE0)
+  ijmp
+  NOPS 48
+uq_sled_end:
+  lds r24, TCNT1L
+  lds r25, TCNT1H
+  sts UDR0, r18
+  sts UDR0, r18
+  sts UCSR0B, r19
+  sei
+  ldi r19, 16
+5: ldi r18, 250
+4: dec r18
+  brne 4b
+  dec r19
+  brne 5b
+  cli
+  lds r18, isr16
+  lds r19, isr16+1
+  sub r18, r24
+  sbc r19, r25
+  movw r24, r18
+  ret
+
+; Prescaler reset, Timer0 started at clk/8, TCNT0 read r24 (0..47) cycles later.
+.global t_presc_f
+t_presc_f:
+  out IO(TCCR0B), r1
+  out IO(TCCR0A), r1
+  out IO(TCNT0), r1
+  ldi r30, pm_lo8(pf_end)
+  ldi r31, pm_hi8(pf_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r18, (1<<PSRSYNC)
+  ldi r19, 2
+  out IO(GTCCR), r18
+  out IO(TCCR0B), r19
+  ijmp
+  NOPS 48
+pf_end:
+  in r24, IO(TCNT0)
+  out IO(TCCR0B), r1
+  ldi r18, 7
+  out IO(TIFR0), r18
+  ret
+
+; The same, then 20 cycles later stop, clear TCNT0 and restart; TCNT0 read r24 cycles
+; after the restart.
+.global t_presc_h
+t_presc_h:
+  out IO(TCCR0B), r1
+  out IO(TCCR0A), r1
+  out IO(TCNT0), r1
+  ldi r30, pm_lo8(ph_end)
+  ldi r31, pm_hi8(ph_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r18, (1<<PSRSYNC)
+  ldi r19, 2
+  out IO(GTCCR), r18
+  out IO(TCCR0B), r19
+  NOPS 20
+  out IO(TCCR0B), r1
+  out IO(TCNT0), r1
+  out IO(TCCR0B), r19
+  ijmp
+  NOPS 48
+ph_end:
+  in r24, IO(TCNT0)
+  out IO(TCCR0B), r1
+  ldi r18, 7
+  out IO(TIFR0), r18
+  ret
+
+; Prescaler reset with all timers stopped, r24 (0..47) cycles later start Timer0 at
+; clk/8 and read TCNT0 12 cycles after that.
+.global t_presc_i
+t_presc_i:
+  out IO(TCCR0B), r1
+  out IO(TCCR0A), r1
+  out IO(TCNT0), r1
+  sts TCCR1B, r1
+  ldi r30, pm_lo8(pi_end)
+  ldi r31, pm_hi8(pi_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r18, (1<<PSRSYNC)
+  ldi r19, 2
+  out IO(GTCCR), r18
+  ijmp
+  NOPS 48
+pi_end:
+  out IO(TCCR0B), r19
+  NOPS 12
+  in r24, IO(TCNT0)
+  out IO(TCCR0B), r1
+  ldi r18, 7
+  out IO(TIFR0), r18
+  ret
+
+; Two bytes written back to back: cycles from the first UDR0 write to the
+; TX-complete interrupt after the second frame. r24 = 0..47 extra cycles.
+.global t_uart_txc2
+t_uart_txc2:
+  ldi r30, pm_lo8(ut_sled_end)
+  ldi r31, pm_hi8(ut_sled_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r19, 16
+2: ldi r18, 250
+1: dec r18
+  brne 1b
+  dec r19
+  brne 2b
+  lds r18, UCSR0A
+  ori r18, (1<<TXC0)
+  sts UCSR0A, r18
+  call t1_start
+  lds r18, UCSR0B
+  ori r18, (1<<TXCIE0)
+  sts UCSR0B, r18
+  ldi r18, 0x0A
+  sei
+  ijmp
+  NOPS 48
+ut_sled_end:
+  lds r24, TCNT1L
+  lds r25, TCNT1H
+  sts UDR0, r18
+  sts UDR0, r18
+  ldi r19, 16
+5: ldi r18, 250
+4: dec r18
+  brne 4b
+  dec r19
+  brne 5b
+  cli
+  lds r18, UCSR0B
+  andi r18, ~(1<<TXCIE0)
+  sts UCSR0B, r18
+  lds r18, isr16
+  lds r19, isr16+1
+  sub r18, r24
+  sbc r19, r25
+  movw r24, r18
+  ret
+
+; r22 bytes sent with a polling loop (wait for UDRE, write UDR0), starting idle with
+; r24 (0..47) extra cycles of delay: cycles from just before the first write to the
+; end of the last one.
+.global t_uart_putn
+t_uart_putn:
+  ldi r30, pm_lo8(up_sled_end)
+  ldi r31, pm_hi8(up_sled_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r19, 16
+2: ldi r18, 250
+1: dec r18
+  brne 1b
+  dec r19
+  brne 2b
+  call t1_start
+  ldi r18, 0x0A
+  ijmp
+  NOPS 48
+up_sled_end:
+  lds r24, TCNT1L
+  lds r25, TCNT1H
+3: lds r19, UCSR0A
+  sbrs r19, UDRE0
+  rjmp 3b
+  sts UDR0, r18
+  dec r22
+  brne 3b
+  lds r18, TCNT1L
+  lds r19, TCNT1H
+  sub r18, r24
+  sbc r19, r25
+  movw r24, r18
   ret

@@ -56,31 +56,6 @@ class ATmega2560Emulator(
         # address, which costs one more cycle for CALL/RCALL/ICALL and RET/RETI
         # than on 16-bit PC devices.
         self.pc_extra_cycles: int = 1 if self.PC_WORD_MASK > 0xFFFF else 0
-        # Position inside the instruction being executed (None outside step()).
-        self._step_pre: Optional[int] = None
-        self._step_irq_sampled = False
-        self._step_irq_candidate = False
-        self._step_i_before = 0
-        self._step_wdt_event: Optional[str] = None
-        # I/O registers where SBI/CBI act on the named bit only: writing PINx
-        # toggles, and the interrupt flag registers are write-one-to-clear.
-        self._bit_write_addrs = set(self.GPIO_PIN_ADDRS) | set(range(0x35, 0x3D))  # TIFR0-5, PCIFR, EIFR
-        # 16-bit timer TEMP high-byte register, one per timer.
-        self._t16_temp: dict[int, int] = {}
-        self._t16_high_write: dict[int, int] = {}
-        self._t16_low_write: dict[int, tuple[int, int]] = {}
-        self._t16_low_read: dict[int, tuple[int, int]] = {}
-        self._t16_high_read: dict[int, int] = {}
-        for n, timer_cls in ((1, Timer1), (3, Timer3), (4, Timer4), (5, Timer5)):
-            self._t16_temp[n] = 0
-            for stem in (f"TCNT{n}", f"ICR{n}", f"OCR{n}A", f"OCR{n}B", f"OCR{n}C"):
-                lo = getattr(timer_cls, f"DATA_{stem}L")
-                hi = getattr(timer_cls, f"DATA_{stem}H")
-                self._t16_high_write[hi] = n
-                self._t16_low_write[lo] = (n, hi)
-                if not stem.startswith("OCR"):
-                    self._t16_low_read[lo] = (n, hi)
-                    self._t16_high_read[hi] = n
         self.reset_count: int = 0
         self.watchdog_reset_count: int = 0
 
@@ -112,7 +87,45 @@ class ATmega2560Emulator(
         self.uart3 = UART3()
         self.uarts: List[UARTBase] = [self.uart0, self.uart1, self.uart2, self.uart3]
         self.watchdog = WatchdogTimer()
-        self._ext_int_levels: List[int] = [1] * 8
+        # Position inside the instruction being executed (None outside step()).
+        self._step_pre: Optional[int] = None
+        self._step_irq_sampled = False
+        self._step_irq_candidate = False
+        self._step_i_before = 0
+        self._step_wdt_event: Optional[str] = None
+        # I/O registers where SBI/CBI act on the named bit only: writing PINx
+        # toggles, and the interrupt flag registers are write-one-to-clear.
+        self._bit_write_addrs = set(self.GPIO_PIN_ADDRS) | set(range(0x35, 0x3D))  # TIFR0-5, PCIFR, EIFR
+        self._timers16 = {1: self.timer1, 3: self.timer3, 4: self.timer4, 5: self.timer5}
+        self._uart_by_ubrrl = {uart.DATA_UBRRL: uart for uart in self.uarts}
+        # 16-bit timer TEMP high-byte register, one per timer.
+        self._t16_temp: dict[int, int] = {}
+        self._t16_high_write: dict[int, int] = {}
+        self._t16_low_write: dict[int, tuple[int, int]] = {}
+        self._t16_low_read: dict[int, tuple[int, int]] = {}
+        self._t16_high_read: dict[int, int] = {}
+        for n, timer_cls in ((1, Timer1), (3, Timer3), (4, Timer4), (5, Timer5)):
+            self._t16_temp[n] = 0
+            for stem in (f"TCNT{n}", f"ICR{n}", f"OCR{n}A", f"OCR{n}B", f"OCR{n}C"):
+                lo = getattr(timer_cls, f"DATA_{stem}L")
+                hi = getattr(timer_cls, f"DATA_{stem}H")
+                self._t16_high_write[hi] = n
+                self._t16_low_write[lo] = (n, hi)
+                if not stem.startswith("OCR"):
+                    self._t16_low_read[lo] = (n, hi)
+                    self._t16_high_read[hi] = n
+        self._ext_int_levels: List[int] = [0] * 8
+        self._ext_level_mask = 0  # INTn in low-level mode with the pin low
+        self._extint_dirty = True
+        # Free-running prescaler shared by Timer0, 1, 3, 4 and 5.
+        self._prescaler = 0
+        self._prescaler_hold = False
+        self._sleeping = False
+        self._step_halt_cycles = 0
+        self._adc_first_conversion = True
+        self._adc_locked = False
+        # TWI slave addresses that acknowledge; None means every address does.
+        self.twi_devices: Optional[set] = None
         self._eeprom_write_cycles_remaining = 0
         self._eeprom_write_addr = 0
         self._eeprom_write_value = 0
@@ -229,8 +242,17 @@ class ATmega2560Emulator(
             self._gpio_input_driven[pin_addr] = 0
             self._gpio_output_override_values[pin_addr] = 0
             self._gpio_output_override_masks[pin_addr] = 0
-        self._ext_int_levels = [1] * 8
         self._update_gpio_alt_overrides()
+        self._ext_int_levels = [0] * 8
+        self._ext_level_mask = 0
+        self._extint_dirty = True
+        self._update_ext_int_flags()
+        self._prescaler = 0
+        self._prescaler_hold = False
+        self._sleeping = False
+        self._step_halt_cycles = 0
+        self._adc_first_conversion = True
+        self._adc_locked = False
         self._reset_profile_counters()
 
     # -----------------------------
@@ -307,6 +329,8 @@ class ATmega2560Emulator(
     def step(self) -> StepResult:
         if self.halted:
             return StepResult(self.pc, 0x0000, 0, "HALT")
+        if self._sleeping:
+            return self._step_sleep()
 
         pc_before = self.pc
         opcode = self.fetch()
@@ -316,6 +340,7 @@ class ATmega2560Emulator(
         self._step_irq_sampled = False
         self._step_irq_candidate = False
         self._step_wdt_event = None
+        self._step_halt_cycles = 0
         # Setting I (SEI, RETI, OUT SREG) allows interrupts one instruction later.
         self._step_i_before = self.sreg & 0x80
 
@@ -963,46 +988,6 @@ class ATmega2560Emulator(
             used_cycles = 2
             desc = f"ST X, r{rr}"
 
-        # XCH Z, Rd: 1001 001d dddd 0100
-        elif (opcode & 0xFE0F) == 0x9204:
-            rd = (opcode >> 4) & 0x1F
-            addr = self._get_ptr("Z")
-            old_mem = self._data_read(addr)
-            self._data_write(addr, self.reg[rd])
-            self.reg[rd] = old_mem
-            used_cycles = 2
-            desc = f"XCH Z, r{rd}"
-
-        # LAS Z, Rd: 1001 001d dddd 0101
-        elif (opcode & 0xFE0F) == 0x9205:
-            rd = (opcode >> 4) & 0x1F
-            addr = self._get_ptr("Z")
-            old_mem = self._data_read(addr)
-            self._data_write(addr, old_mem | self.reg[rd])
-            self.reg[rd] = old_mem
-            used_cycles = 2
-            desc = f"LAS Z, r{rd}"
-
-        # LAC Z, Rd: 1001 001d dddd 0110
-        elif (opcode & 0xFE0F) == 0x9206:
-            rd = (opcode >> 4) & 0x1F
-            addr = self._get_ptr("Z")
-            old_mem = self._data_read(addr)
-            self._data_write(addr, old_mem & (~self.reg[rd] & 0xFF))
-            self.reg[rd] = old_mem
-            used_cycles = 2
-            desc = f"LAC Z, r{rd}"
-
-        # LAT Z, Rd: 1001 001d dddd 0111
-        elif (opcode & 0xFE0F) == 0x9207:
-            rd = (opcode >> 4) & 0x1F
-            addr = self._get_ptr("Z")
-            old_mem = self._data_read(addr)
-            self._data_write(addr, old_mem ^ self.reg[rd])
-            self.reg[rd] = old_mem
-            used_cycles = 2
-            desc = f"LAT Z, r{rd}"
-
         # STD Y+q / Z+q, Rr: 10q0 qq1r rrrr yqqq (y=1->Y, y=0->Z)
         elif (opcode & 0xD200) == 0x8200:
             rr = (opcode >> 4) & 0x1F
@@ -1228,8 +1213,14 @@ class ATmega2560Emulator(
 
         # SLEEP: 1001 0101 1000 1000
         elif opcode == 0x9588:
-            self.halt_reason = f"SLEEP at PC=0x{pc_before:06X}"
-            self.halted = True
+            # Without SMCR.SE the instruction does nothing.
+            if self.data[self.DATA_SMCR] & 0x01:
+                if self._get_flag(self.FLAG_I):
+                    self._sleeping = True
+                else:
+                    # Nothing can wake the CPU with interrupts disabled.
+                    self.halt_reason = f"SLEEP with interrupts disabled at PC=0x{pc_before:06X}"
+                    self.halted = True
             desc = "SLEEP"
 
         # BREAK: 1001 0101 1001 1000
@@ -1400,6 +1391,8 @@ class ATmega2560Emulator(
         if not self._step_irq_sampled:
             self._step_sync(used_cycles - 1)
             self._sample_interrupts()
+        # EEPROM strobes halt the CPU for a few cycles: the instruction takes longer.
+        used_cycles += self._step_halt_cycles
         self._step_sync(used_cycles)
         self._step_pre = None
         if self._step_wdt_event == "reset":
@@ -1407,10 +1400,40 @@ class ATmega2560Emulator(
             return StepResult(pc_before, opcode, used_cycles, desc)
         if self._step_irq_candidate:
             entry_cycles = self._service_interrupts()
+            if entry_cycles:
+                self._sleeping = False  # the interrupt was already pending: no sleep
             # Time passes for the peripherals during interrupt entry too.
             if entry_cycles and self._advance_time(entry_cycles) == "reset":
                 self._perform_watchdog_reset()
         return StepResult(pc_before, opcode, used_cycles, desc)
+
+    def _step_sleep(self) -> StepResult:
+        """One cycle of sleep. In idle mode everything but the CPU keeps running; in
+        the deeper modes only the watchdog and the pin interrupts do (and Timer2
+        when it is clocked asynchronously)."""
+        pc = self.pc
+        mode = (self.data[self.DATA_SMCR] >> 1) & 0x07
+        if mode == 0:
+            event = self._advance_time(1)
+        else:
+            if (self.data[Timer2.DATA_ASSR] >> Timer2.AS2_BIT) & 1:
+                self.timer2.advance(1, self.data)
+            self._update_pcint_flags()
+            self._update_ext_int_flags()
+            event = self.watchdog.advance(1, self.data)
+            self.cycles += 1
+            self.total_cycles += 1
+        if event == "reset":
+            self._perform_watchdog_reset()
+        elif self._get_flag(self.FLAG_I) and self._find_pending_interrupt() is not None:
+            self._sleeping = False
+            if self._advance_time(self.SLEEP_WAKE_CYCLES) == "reset":
+                self._perform_watchdog_reset()
+            else:
+                entry_cycles = self._service_interrupts()
+                if entry_cycles and self._advance_time(entry_cycles) == "reset":
+                    self._perform_watchdog_reset()
+        return StepResult(pc, 0x9588, 1, "SLEEP")
 
     def _step_sync(self, offset: int) -> None:
         """Advance time to `offset` cycles into the instruction being executed."""
@@ -1438,17 +1461,23 @@ class ATmega2560Emulator(
 
         Returns the watchdog event for that span ("interrupt", "reset" or None).
         """
-        self.timer0.advance(cycles, self.data)
-        self.timer1.advance(cycles, self.data)
+        prescaler = self._prescaler
+        self.timer0.advance(cycles, self.data, prescaler)
+        self.timer1.advance(cycles, self.data, prescaler)
         self.timer2.advance(cycles, self.data)
-        self.timer3.advance(cycles, self.data)
-        self.timer4.advance(cycles, self.data)
-        self.timer5.advance(cycles, self.data)
+        self.timer3.advance(cycles, self.data, prescaler)
+        self.timer4.advance(cycles, self.data, prescaler)
+        self.timer5.advance(cycles, self.data, prescaler)
+        # The prescaler pauses while none of its timers has a clock selected.
+        data = self.data
+        if not self._prescaler_hold and ((data[0x45] | data[0x81] | data[0x91] | data[0xA1] | data[0x121]) & 0x07):
+            self._prescaler = prescaler + cycles
         self._advance_spi(cycles)
         self._advance_adc(cycles)
         self._advance_eeprom(cycles)
         self._advance_twi(cycles)
         self._update_pcint_flags()
+        self._update_ext_int_flags()
         uart_tx_before = (
             bool(self.uart0._pending_tx)
             or bool(self.uart1._pending_tx)

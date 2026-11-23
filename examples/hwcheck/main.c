@@ -8,6 +8,12 @@ uint8_t t_ctc0(uint8_t n), t_ctc1(uint8_t n), t_spi(void), t_temp(void);
 uint8_t t_fmul(uint8_t a, uint8_t b), t_fmuls(uint8_t a, uint8_t b), t_fmulsu(uint8_t a, uint8_t b);
 uint8_t t_pin_sbi(void), t_pin_cbi(void), t_sreg_mem(void), t_reg_mem(void);
 void t_prio(void);
+uint8_t t_sleep_idle(void), t_sleep_nose(void), t_t1mode(uint8_t a, uint8_t b, uint8_t top, uint8_t n), t_icr_normal(void);
+uint8_t t_irq_lat_pc(void), t_presc(uint8_t k), t_eere(void), t_eepe(void), t_eeread_val(void);
+uint8_t t_spi_done0(uint8_t spcr, uint8_t spsr, uint8_t n), t_spi_done1(uint8_t spcr, uint8_t spsr, uint8_t n), t_spi_done2(uint8_t spcr, uint8_t spsr, uint8_t n);
+uint16_t t_uart_frame(uint8_t n), t_uart_udre(uint8_t n), t_uart_frame2(uint8_t d), t_uart_udre2(uint8_t d), t_uart_txc2(uint8_t d);
+uint8_t t_presc_b(uint8_t k), t_presc_c(uint8_t k), t_presc_d(uint8_t k), t_presc_e(uint8_t k), t_gtccr(void), t_presc_f(uint8_t j), t_presc_h(uint8_t j), t_presc_i(uint8_t j);
+extern uint8_t last_tifr;
 uint8_t t_irq_lat2(uint8_t ocr), t_irq_lat3(uint8_t ocr);
 uint8_t t_start_read1(void), t_start_read0(void), t_irq_sei(void), t_irq_mask(void), t_adif(void), t_spif(void), t_txc(void);
 extern uint8_t ord_t0, ord_t1, ord_t2;
@@ -23,6 +29,36 @@ static void hex(uint8_t v) {
 }
 static void line(const char *name, uint8_t v) { puts_(name); put('='); hex(v); put('\r'); put('\n'); }
 
+static void line16(const char *name, uint16_t v) { puts_(name); put('='); hex(v >> 8); hex(v & 0xFF); put('\r'); put('\n'); }
+
+static void mode(const char *name, uint8_t a, uint8_t b, uint8_t top) {
+  char buf[12]; uint8_t i = 0;
+  while (name[i]) { buf[i] = name[i]; i++; }
+  buf[i + 1] = 0;
+  buf[i] = 'a'; line(buf, t_t1mode(a, b, top, 100));
+  buf[i] = 'b'; line(buf, t_t1mode(a, b, top, 137));
+  buf[i] = 'f'; line(buf, last_tifr);
+}
+
+static uint8_t spi_done(uint8_t spcr, uint8_t spsr, uint16_t d) {
+  uint8_t n = d / 3;
+  switch (d % 3) {
+    case 0: return t_spi_done0(spcr, spsr, n);
+    case 1: return t_spi_done1(spcr, spsr, n);
+    default: return t_spi_done2(spcr, spsr, n);
+  }
+}
+
+// First delay (in cycles after the SPDR write, plus one) at which SPIF reads as set.
+static uint16_t spi_time(uint8_t spcr, uint8_t spsr) {
+  uint16_t lo = 3, hi = 767;  // not set at lo, set at hi
+  while (hi - lo > 1) {
+    uint16_t mid = (lo + hi) / 2;
+    if (spi_done(spcr, spsr, mid)) hi = mid; else lo = mid;
+  }
+  return hi;
+}
+
 int main(void) {
   cli();
   UCSR0A = _BV(U2X0);
@@ -30,7 +66,7 @@ int main(void) {
   UCSR0B = _BV(TXEN0);
   UCSR0C = _BV(UCSZ01) | _BV(UCSZ00);
 
-  puts_("HWCHECK 2\r\n");
+  puts_("HWCHECK 9\r\n");
   uint8_t base = t_base();
   line("base", base);
   line("nop", t_nop() - base);
@@ -76,8 +112,42 @@ int main(void) {
   line("irq_lat3_60", t_irq_lat3(60));
   line("irq_lat3_61", t_irq_lat3(61));
   line("irq_lat3_62", t_irq_lat3(62));
+  line("sleep_idle", t_sleep_idle());
+  line("sleep_nose", t_sleep_nose() - base);
+  mode("m4", 0x00, 0x08, 99);   // CTC, TOP = OCR1A
+  mode("m12", 0x00, 0x18, 99);  // CTC, TOP = ICR1
+  mode("m14", 0x02, 0x18, 99);  // fast PWM, TOP = ICR1
+  mode("m15", 0x03, 0x18, 99);  // fast PWM, TOP = OCR1A
+  mode("m8", 0x00, 0x10, 50);   // phase and frequency correct, TOP = ICR1
+  mode("m10", 0x02, 0x10, 50);  // phase correct, TOP = ICR1
+  mode("m11", 0x03, 0x10, 50);  // phase correct, TOP = OCR1A
+  mode("m1", 0x01, 0x00, 50);   // phase correct, 8-bit
+  mode("m5", 0x01, 0x08, 50);   // fast PWM, 8-bit
+  line("icr_normal", t_icr_normal());
+  line("irq_lat_pc", t_irq_lat_pc());
+  for (uint8_t k = 0; k <= 8; k++) { char n[8] = "presc_0"; n[6] = '0' + k; line(n, t_presc(k)); }
+  for (uint8_t k = 0; k <= 8; k++) { char n[9] = "prescb_0"; n[7] = '0' + k; line(n, t_presc_b(k)); }
+  for (uint8_t k = 0; k <= 8; k++) { char n[9] = "prescd_0"; n[7] = '0' + k; line(n, t_presc_d(k)); }
+  for (uint8_t k = 0; k <= 8; k++) { char n[9] = "presce_0"; n[7] = '0' + k; line(n, t_presc_e(k)); }
+  line("gtccr", t_gtccr());
+  // One hex digit per delay 0..39.
+  puts_("pf="); for (uint8_t j = 0; j < 40; j++) put("0123456789ABCDEF"[t_presc_f(j) & 15]); puts_("\r\n");
+  puts_("ph="); for (uint8_t j = 0; j < 40; j++) put("0123456789ABCDEF"[t_presc_h(j) & 15]); puts_("\r\n");
+  puts_("pi="); for (uint8_t j = 0; j < 40; j++) put("0123456789ABCDEF"[t_presc_i(j) & 15]); puts_("\r\n");
+  line16("spi_f4", spi_time(0x50, 0));
+  line16("spi_f16", spi_time(0x51, 0));
+  line16("spi_f64", spi_time(0x52, 0));
+  line16("spi_f2", spi_time(0x50, 1));
+  line16("spi_f8", spi_time(0x51, 1));
   while (!(UCSR0A & _BV(UDRE0))) {}
   line("txc", t_txc());
+  line16("uart_udre_10", t_uart_udre(10));
+  line16("uart_udre_23", t_uart_udre(23));
+  // The EEPROM write is timed by an RC oscillator, so it comes last: nothing
+  // after it has to be cycle-exact.
+  line("eere", t_eere() - base);
+  line("eepe", t_eepe() - base);
+  line("eeread_val", t_eeread_val());
   puts_("DONE\r\n");
   for (;;) {}
 }

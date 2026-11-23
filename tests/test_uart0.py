@@ -13,13 +13,18 @@ class TestUART0(unittest.TestCase):
         program = [
             ldi(16, 0x41),
             *sts(16, UART0.DATA_UDR0),
+            0xCFFF,  # rjmp .-2
         ]
         emu.load_program_words(program)
 
         emu.step()
         emu.step()
+        self.assertEqual(emu.uart0.tx_log, [])
+        self.assertEqual((emu.data[UART0.DATA_UCSR0A] >> UART0.UDRE0_BIT) & 1, 1)  # byte is in the shift register
 
-        emu.step()  # one instruction later (hardware timing)
+        # 10 bits of 16 cycles at UBRR = 0, starting on the next baud-generator tick.
+        for _ in range(85):
+            emu.step()
         self.assertEqual(emu.uart0.tx_log, [0x41])
         ucsr0a = emu.data[UART0.DATA_UCSR0A]
         self.assertEqual((ucsr0a >> UART0.UDRE0_BIT) & 1, 1)
@@ -86,16 +91,21 @@ class TestUART0(unittest.TestCase):
         program = [
             ldi(16, 0x41),
             *sts(16, UART0.DATA_UDR0),
+            0xCFFF,  # rjmp .-2: wait here for the interrupt
         ]
-        program.extend([0x0000] * 80)
+        program.extend([0x0000] * 300)
         emu.load_program_words(program)
 
         emu.step()  # LDI
-        emu.step()  # STS -> queues TX, completion happens at end of step
+        emu.step()  # STS -> the frame starts
+        for _ in range(100):  # until the frame is out (160 cycles)
+            emu.step()
+            if emu.pc == emu.VECTOR_USART0_TX:
+                break
 
-        emu.step()  # one instruction later (hardware timing)
-        emu.step()  # one instruction later (hardware timing)
+        self.assertEqual(emu.uart0.tx_log, [0x41])
         self.assertEqual(emu.pc, emu.VECTOR_USART0_TX)
+        self.assertEqual((emu.data[UART0.DATA_UCSR0A] >> UART0.TXC0_BIT) & 1, 0)  # cleared by the vector
 
 
 if __name__ == "__main__":

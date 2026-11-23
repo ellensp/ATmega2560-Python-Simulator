@@ -67,7 +67,7 @@ class TestPCINT(unittest.TestCase):
     def test_pcint1_and_pcint2_interrupt_dispatch(self) -> None:
         emu = self._new_emu()
         emu._set_flag(emu.FLAG_I, 1)
-        emu.data[emu.DATA_PCMSK1] = 1 << 2
+        emu.data[emu.DATA_PCMSK1] = 1 << 3  # PCINT11 = PJ2
         emu.data[emu.DATA_PCMSK2] = 1 << 4
         emu.data[emu.DATA_PCICR] = (1 << 1) | (1 << 2)
 

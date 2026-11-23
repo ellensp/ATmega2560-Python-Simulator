@@ -119,6 +119,11 @@ class _EmulatorConstants:
     DATA_EIND = 0x005C
     DATA_SPL = 0x005D
     DATA_SPH = 0x005E
+    DATA_GTCCR = 0x0043
+    DATA_SMCR = 0x0053
+    # Cycles from a wake-up interrupt becoming pending in idle sleep to the start
+    # of its entry (1 when awake). Measured on a real ATmega2560.
+    SLEEP_WAKE_CYCLES = 7
     DATA_SREG = 0x005F
     DATA_EECR = 0x003F
     DATA_EEDR = 0x0040
@@ -134,7 +139,13 @@ class _EmulatorConstants:
     EECR_EERIE_BIT = 3
     EECR_EEPM0_BIT = 4
     EECR_EEPM1_BIT = 5
-    EEPROM_WRITE_CYCLES = 2
+    # Self-timed programming: 3.3 ms for erase + write, 1.8 ms for erase only or
+    # write only, at 16 MHz.
+    EEPROM_WRITE_CYCLES = 52800
+    EEPROM_HALF_WRITE_CYCLES = 28800
+    # The CPU is halted for 4 cycles after EERE and 2 after EEPE (measured).
+    EEPROM_READ_HALT_CYCLES = 4
+    EEPROM_WRITE_HALT_CYCLES = 2
     EEPROM_EEMPE_WINDOW_CYCLES = 4
 
     # ADC
@@ -205,8 +216,11 @@ class _EmulatorConstants:
         pin_addr: (ddr_addr, port_addr)
         for pin_addr, ddr_addr, port_addr in GPIO_PORTS.values()
     }
-    # PIN addresses for the three PCINT groups (B, J, K).
-    PCINT_GROUP_PIN_ADDRS = (0x23, 0x103, 0x106)
+    # PIN addresses feeding the three PCINT groups: PCINT0-7 = PB0-7,
+    # PCINT8 = PE0 and PCINT9-15 = PJ0-6, PCINT16-23 = PK0-7.
+    PCINT_GROUP_PIN_ADDRS = (0x23, 0x2C, 0x103, 0x106)
+    # INT0-3 are PD0-3, INT4-7 are PE4-7: registers whose writes can change them.
+    EXTINT_RELEVANT_DATA_ADDRS = {0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x0069, 0x006A}
     # Data-space addresses that can change which pins contribute to PCINT groups.
     PCINT_RELEVANT_DATA_ADDRS = {
         DATA_PCMSK0,
@@ -216,6 +230,9 @@ class _EmulatorConstants:
         0x23,
         0x24,
         0x25,
+        0x2C,
+        0x2D,
+        0x2E,
         0x103,
         0x104,
         0x105,

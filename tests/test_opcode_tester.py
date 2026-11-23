@@ -162,26 +162,6 @@ def sbis(io_addr: int, bit: int) -> int:
     return 0x9B00 | ((io_addr & 0x1F) << 3) | (bit & 0x7)
 
 
-def op_z_atomic(base: int, rd: int) -> int:
-    return base | ((rd & 0x1F) << 4)
-
-
-def xch(rd: int) -> int:
-    return op_z_atomic(0x9204, rd)
-
-
-def las(rd: int) -> int:
-    return op_z_atomic(0x9205, rd)
-
-
-def lac(rd: int) -> int:
-    return op_z_atomic(0x9206, rd)
-
-
-def lat(rd: int) -> int:
-    return op_z_atomic(0x9207, rd)
-
-
 def elpm(rd: int | None = None, post_inc: bool = False) -> int:
     if rd is None:
         return 0x95D8
@@ -544,10 +524,11 @@ class TestOpcodeTesterMatrix(unittest.TestCase):
                 expect_cycles=10,
             ),
             OpcodeTestCase(
-                program_words=[0x9588, ldi(16, 0xAA)],  # SLEEP
-                expect_regs={16: 0x00},
-                expect_pc=1,
-                expect_cycles=1,
+                program_words=[0x9588, ldi(16, 0xAA)],  # SLEEP without SMCR.SE does nothing
+                steps=2,
+                expect_regs={16: 0xAA},
+                expect_pc=2,
+                expect_cycles=2,
             ),
             OpcodeTestCase(
                 program_words=[0x95A8, ldi(16, 0xAA)],  # WDR
@@ -743,38 +724,6 @@ class TestOpcodeTesterMatrix(unittest.TestCase):
                 init_data={0x005B: 0x00},  # RAMPZ
                 expect_regs={16: 0x06, 17: 0x06, 30: 0x01, 31: 0x00},
                 expect_cycles=6,
-            ),
-            OpcodeTestCase(
-                program_words=[xch(16)],
-                init_regs={16: 0xAA, 30: 0x00, 31: 0x02},
-                init_data={0x0200: 0x55},
-                expect_regs={16: 0x55},
-                expect_data={0x0200: 0xAA},
-                expect_cycles=2,
-            ),
-            OpcodeTestCase(
-                program_words=[las(16)],
-                init_regs={16: 0x0F, 30: 0x01, 31: 0x02},
-                init_data={0x0201: 0xF0},
-                expect_regs={16: 0xF0},
-                expect_data={0x0201: 0xFF},
-                expect_cycles=2,
-            ),
-            OpcodeTestCase(
-                program_words=[lac(16)],
-                init_regs={16: 0x0F, 30: 0x02, 31: 0x02},
-                init_data={0x0202: 0xFF},
-                expect_regs={16: 0xFF},
-                expect_data={0x0202: 0xF0},
-                expect_cycles=2,
-            ),
-            OpcodeTestCase(
-                program_words=[lat(16)],
-                init_regs={16: 0x0F, 30: 0x03, 31: 0x02},
-                init_data={0x0203: 0xF0},
-                expect_regs={16: 0xF0},
-                expect_data={0x0203: 0xFF},
-                expect_cycles=2,
             ),
             OpcodeTestCase(
                 # SPM writes R1:R0 into program word at Z/2; LPM reads back low byte.

@@ -7,7 +7,54 @@ class TestEEPROMController(unittest.TestCase):
     def _new_emu(self) -> ATmega2560Emulator:
         emu = ATmega2560Emulator()
         emu.load_program_words([0x0000] * 128)
+        emu.EEPROM_WRITE_CYCLES = 2  # short programming time for these tests
+        emu.EEPROM_HALF_WRITE_CYCLES = 2
         return emu
+
+    def test_write_takes_3_3_ms(self) -> None:
+        emu = ATmega2560Emulator()
+        emu.load_program_words([0xCFFF])  # rjmp .-2
+        emu._data_write(emu.DATA_EEARL, 0x10)
+        emu._data_write(emu.DATA_EEDR, 0x5A)
+        emu._data_write(emu.DATA_EECR, 1 << emu.EECR_EEMPE_BIT)
+        emu._data_write(emu.DATA_EECR, 1 << emu.EECR_EEPE_BIT)
+
+        for _ in range(52800 // 2 - 1):  # 2 cycles per step
+            emu.step()
+        self.assertEqual((emu.data[emu.DATA_EECR] >> emu.EECR_EEPE_BIT) & 1, 1)
+        self.assertEqual(emu.eeprom[0x0010], 0x00)
+        emu.step()
+        self.assertEqual((emu.data[emu.DATA_EECR] >> emu.EECR_EEPE_BIT) & 1, 0)
+        self.assertEqual(emu.eeprom[0x0010], 0x5A)
+
+    def test_erase_only_and_write_only_modes(self) -> None:
+        emu = self._new_emu()
+        emu.eeprom[0x0020] = 0xF0
+
+        emu._data_write(emu.DATA_EEARL, 0x20)
+        emu._data_write(emu.DATA_EEDR, 0x3C)
+        mode_write_only = 1 << emu.EECR_EEPM1_BIT
+        emu._data_write(emu.DATA_EECR, mode_write_only | (1 << emu.EECR_EEMPE_BIT))
+        emu._data_write(emu.DATA_EECR, mode_write_only | (1 << emu.EECR_EEPE_BIT))
+        emu.step()
+        emu.step()
+        self.assertEqual(emu.eeprom[0x0020], 0x30)  # write only: bits can only be cleared
+
+        mode_erase_only = 1 << emu.EECR_EEPM0_BIT
+        emu._data_write(emu.DATA_EECR, mode_erase_only | (1 << emu.EECR_EEMPE_BIT))
+        emu._data_write(emu.DATA_EECR, mode_erase_only | (1 << emu.EECR_EEPE_BIT))
+        emu.step()
+        emu.step()
+        self.assertEqual(emu.eeprom[0x0020], 0xFF)
+
+    def test_read_and_write_strobes_halt_the_cpu(self) -> None:
+        emu = ATmega2560Emulator()
+        eecr_io = emu.DATA_EECR - 0x20
+        sbi = lambda bit: 0x9A00 | (eecr_io << 3) | bit  # noqa: E731
+        emu.load_program_words([sbi(emu.EECR_EERE_BIT), sbi(emu.EECR_EEMPE_BIT), sbi(emu.EECR_EEPE_BIT)])
+        self.assertEqual(emu.step().cycles, 2 + 4)  # read: halted 4 cycles
+        self.assertEqual(emu.step().cycles, 2)
+        self.assertEqual(emu.step().cycles, 2 + 2)  # write: halted 2 cycles
 
     def test_eere_reads_selected_eeprom_byte_into_eedr(self) -> None:
         emu = self._new_emu()

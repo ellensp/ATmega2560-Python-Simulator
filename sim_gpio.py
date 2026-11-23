@@ -152,6 +152,7 @@ class _GpioMixin:
         )
         if new_pcint_overrides != prev_pcint_overrides:
             self._pcint_dirty = True
+        self._extint_dirty = True
 
         self._gpio_alt_signature = signature
 
@@ -163,7 +164,10 @@ class _GpioMixin:
         if group == 0:
             return self._read_port_by_pin_addr(0x23) or 0
         if group == 1:
-            return self._read_port_by_pin_addr(0x103) or 0
+            # PCINT8 is PE0, PCINT9..15 are PJ0..PJ6.
+            pe = self._read_port_by_pin_addr(0x2C) or 0
+            pj = self._read_port_by_pin_addr(0x103) or 0
+            return (pe & 0x01) | ((pj & 0x7F) << 1)
         if group == 2:
             return self._read_port_by_pin_addr(0x106) or 0
         return 0
@@ -195,27 +199,31 @@ class _GpioMixin:
         self.set_ext_int_pin(0, level)
 
     def set_ext_int_pin(self, index: int, level: int) -> None:
-        """Drive INTx pin level and latch EIFR if configured edge/level condition matches."""
+        """Drive the INTx pin (PD0-3 for INT0-3, PE4-7 for INT4-7)."""
         if index < 0 or index > 7:
             raise ValueError("External interrupt index must be in range 0..7")
+        self.set_pin_level("D" if index < 4 else "E", index, level)
 
-        level = 1 if level else 0
-        isc = self._ext_int_isc(index)
-        old = self._ext_int_levels[index]
-        triggered = False
-
-        if isc == 0b00:
-            triggered = (level == 0)
-        elif isc == 0b01:
-            triggered = (old != level)
-        elif isc == 0b10:
-            triggered = (old == 1 and level == 0)
-        elif isc == 0b11:
-            triggered = (old == 0 and level == 1)
-
-        self._ext_int_levels[index] = level
-        if triggered:
-            self.data[0x20 + self.IO_EIFR] |= 1 << index
+    def _update_ext_int_flags(self) -> None:
+        """Follow the INT0-7 pins: latch EIFR on the configured edge, and track the
+        pins that request a low-level interrupt (those have no flag)."""
+        if not self._extint_dirty:
+            return
+        self._extint_dirty = False
+        pd = self._read_port_by_pin_addr(0x29) or 0
+        pe = self._read_port_by_pin_addr(0x2C) or 0
+        level_mask = 0
+        for index in range(8):
+            level = ((pd if index < 4 else pe) >> index) & 1
+            old = self._ext_int_levels[index]
+            isc = self._ext_int_isc(index)
+            if isc == 0b00:
+                if level == 0:
+                    level_mask |= 1 << index
+            elif (isc == 0b01 and old != level) or (isc == 0b10 and old == 1 and level == 0) or (isc == 0b11 and old == 0 and level == 1):
+                self.data[0x20 + self.IO_EIFR] |= 1 << index
+            self._ext_int_levels[index] = level
+        self._ext_level_mask = level_mask
 
     def set_pin_level(self, port: str, bit: int, level: int) -> None:
         """Drive a simulated external logic level onto a GPIO input pin."""
@@ -233,6 +241,9 @@ class _GpioMixin:
             self.data[pin_addr] &= ~mask & 0xFF
         if pin_addr in self.PCINT_GROUP_PIN_ADDRS:
             self._pcint_dirty = True
+        if pin_addr in (0x29, 0x2C):
+            self._extint_dirty = True
+            self._update_ext_int_flags()
 
     def release_pin_level(self, port: str, bit: int) -> None:
         """Release a simulated GPIO input pin back to high-impedance/floating state."""
@@ -246,3 +257,6 @@ class _GpioMixin:
         self.data[pin_addr] &= ~mask & 0xFF
         if pin_addr in self.PCINT_GROUP_PIN_ADDRS:
             self._pcint_dirty = True
+        if pin_addr in (0x29, 0x2C):
+            self._extint_dirty = True
+            self._update_ext_int_flags()

@@ -29,6 +29,7 @@ class TestINT0(unittest.TestCase):
         emu.data[emu.DATA_EICRA] = 0x03       # rising edge mode
 
         emu.set_int0_pin(1)
+        emu.data[0x20 + emu.IO_EIFR] = 0  # forget the rising edge from the pin's reset level (low)
         emu.set_int0_pin(0)  # falling edge: should not trigger
         emu.step()
 

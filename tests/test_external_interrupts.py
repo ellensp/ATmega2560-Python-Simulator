@@ -40,6 +40,7 @@ class TestExternalInterrupts(unittest.TestCase):
         emu.data[emu.DATA_EICRA] = 0b11 << 4  # rising edge mode INT2
 
         emu.set_ext_int_pin(2, 1)
+        emu.data[0x20 + emu.IO_EIFR] = 0  # forget the rising edge from the pin's reset level (low)
         emu.set_ext_int_pin(2, 0)  # falling edge in rising mode
         emu.step()
 

@@ -28,6 +28,7 @@ class TestExampleFirmwareOutputs(unittest.TestCase):
                 "avr-gcc",
                 "-mmcu=atmega2560",
                 "-DF_CPU=1000UL",
+                "-DBAUD=62UL",  # UBRR = 0: the shortest frame time
                 "-Os",
                 "-Wall",
                 "-Wextra",

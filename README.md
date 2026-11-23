@@ -395,10 +395,17 @@ The timing below was measured on a real ATmega2560 (Arduino Mega 2560 R3) with `
 - An I/O register write takes effect at the end of its instruction. A read samples at the start of the instruction's last cycle.
 - An interrupt is taken at the end of an instruction if it was already pending and enabled one cycle before that end, and the entry takes 4 cycles. So `SEI`, `RETI` and unmasking let one more instruction run first, and a flag set in the last cycle of an instruction waits for the next one.
 - Interrupts are served in vector order (Timer2, Timer1, Timer0, SPI, USART0, ... USART3). TXC, ADIF and SPIF are cleared when their vector is entered.
-- A timer compare flag is set on the timer clock after the match, so a CTC period is OCR + 1 clocks.
+- A timer compare flag is set on the timer clock after the match, so a period is TOP + 1 clocks in every mode (2 x TOP in the phase-correct modes). A TCNT write blocks the match on the next clock.
+- The 16-bit timers implement all sixteen waveform modes (counting and the TOV/OCF/ICF flags; not the OCnx pins or the OCR double buffering of the PWM modes).
+- Timer0, 1, 3, 4 and 5 share one prescaler. It only runs while at least one of them has a clock selected, and `GTCCR.PSRSYNC` resets it.
 - 16-bit timer registers go through the timer's TEMP high byte: write high then low, read low then high.
+- `SLEEP` needs `SMCR.SE`. In idle mode the peripherals keep running, and a wake-up interrupt is entered 7 cycles after it becomes pending (1 when awake). The deeper modes stop everything but the watchdog and the pin interrupts.
+- `EECR.EERE` halts the CPU for 4 cycles and `EEPE` for 2. A write takes 3.3 ms (1.8 ms for erase-only or write-only).
 - `SBI` / `CBI` on PINx or on an interrupt flag register (TIFR0-5, EIFR, PCIFR) act on the named bit only.
-- An SPI byte takes 8 SCK periods plus 2 cycles.
+- An SPI byte takes 8 SCK periods plus 1 cycle (measured at f/2, f/4, f/8, f/16 and f/64).
+- A USART frame takes its real time: the start bit begins on the next baud-generator tick (period UBRR + 1 cycles) and each bit lasts 16 ticks, or 8 with U2X. A second byte waits in UDR and follows without a gap. Frame length and tick alignment match the chip; the exact cycle on which a polled write lands after earlier output is not always reproduced.
+
+Not measured, from the datasheet: INT0-7 follow their pins (PD0-3, PE4-7), including a low level that keeps interrupting; PCINT8 is PE0 and PCINT9-15 are PJ0-6; the watchdog stays enabled after a watchdog reset until `MCUSR.WDRF` is cleared; the first ADC conversion takes 25 ADC clocks and later ones 13, with free-running mode and the ADCL/ADCH read lock; TWI bytes take nine SCL periods, and `set_twi_devices([...])` makes other addresses answer with NACK.
 
 See `examples/hwcheck/README.md` to run the comparison on a board.
 

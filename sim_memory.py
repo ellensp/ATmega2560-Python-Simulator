@@ -49,6 +49,14 @@ class _MemoryMixin:
         if addr == self.DATA_SREG:
             return self.sreg & 0xFF
 
+        if addr == self.DATA_ADCL:
+            # Reading ADCL locks the result registers until ADCH is read.
+            self._adc_locked = True
+            return self.data[addr]
+        if addr == self.DATA_ADCH:
+            self._adc_locked = False
+            return self.data[addr]
+
         if 0x84 <= addr <= 0x12D:
             # 16-bit timer registers share a TEMP high byte per timer: reading
             # TCNTnL/ICRnL latches the high byte, which TCNTnH/ICRnH then return.
@@ -100,6 +108,24 @@ class _MemoryMixin:
             self.sreg = value
             return
 
+        if addr == self.DATA_GTCCR:
+            # PSRSYNC resets the prescaler of Timer0/1/3/4/5 and reads back as 0;
+            # with TSM set the prescaler is held in reset until TSM is cleared.
+            tsm = value & 0x80
+            if value & 0x01:
+                self._prescaler = 0
+            self._prescaler_hold = bool(tsm and (value & 0x01))
+            self.data[addr] = (value & 0x83) if tsm else 0
+            return
+
+        if addr == 0x46:
+            self.timer0._compare_block = True
+        elif addr == 0xB2:
+            self.timer2._compare_block = True
+
+        if addr in self.EXTINT_RELEVANT_DATA_ADDRS:
+            self._extint_dirty = True
+
         if 0x84 <= addr <= 0x12D:
             # 16-bit timer registers: the high byte goes to the timer's TEMP
             # register and reaches the register when the low byte is written.
@@ -111,6 +137,8 @@ class _MemoryMixin:
             if latch is not None:
                 self.data[latch[1]] = self._t16_temp[latch[0]]
                 self.data[addr] = value
+                if addr in self._t16_low_read and (addr & 0x0F) == 0x04:  # TCNTnL
+                    self._timers16[latch[0]]._compare_block = True
                 return
 
         if addr == (0x20 + Timer0.IO_TIFR0):
@@ -181,13 +209,8 @@ class _MemoryMixin:
             self._write_spdr(value)
             return
 
-        if addr == self.DATA_ADCL:
-            self.data[addr] = value
-            return
-
-        if addr == self.DATA_ADCH:
-            self.data[addr] = value
-            return
+        if addr == self.DATA_ADCL or addr == self.DATA_ADCH:
+            return  # read-only
 
         if addr == self.DATA_ACSR:
             self._write_acsr(value)
@@ -235,6 +258,11 @@ class _MemoryMixin:
             self.data[port_addr] ^= value
             if addr in self.PCINT_GROUP_PIN_ADDRS:
                 self._pcint_dirty = True
+            return
+
+        if uart_ubrr := self._uart_by_ubrrl.get(addr):
+            self.data[addr] = value
+            uart_ubrr.restart_baud_generator()
             return
 
         if addr == self.DATA_EECR:

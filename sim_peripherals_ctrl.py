@@ -26,12 +26,15 @@ class _PeripheralsCtrlMixin:
 
     def _adc_conversion_cycles(self) -> int:
         prescaler = self.data[self.DATA_ADCSRA] & self.ADC_ADPS_MASK
-        scale = 1 << prescaler
-        return self.ADC_BASE_CONVERSION_CYCLES * scale
+        scale = 2 if prescaler == 0 else 1 << prescaler  # ADPS 0 and 1 both select /2
+        # 13 ADC clocks, 25 for the first conversion after the ADC is enabled.
+        clocks = 25 if self._adc_first_conversion else self.ADC_BASE_CONVERSION_CYCLES
+        return clocks * scale
 
     def _start_adc_conversion(self) -> None:
         self._adc_conversion_channel = self._adc_selected_channel()
         self._adc_conversion_cycles_remaining = self._adc_conversion_cycles()
+        self._adc_first_conversion = False
         self.data[self.DATA_ADCSRA] |= 1 << self.ADC_ADSC_BIT
 
     def _write_adcsra(self, value: int) -> None:
@@ -50,6 +53,8 @@ class _PeripheralsCtrlMixin:
             | (1 << self.ADC_ADIE_BIT)
             | self.ADC_ADPS_MASK
         )
+        if ((value >> self.ADC_ADEN_BIT) & 1) and not ((cur >> self.ADC_ADEN_BIT) & 1):
+            self._adc_first_conversion = True
         cur = (cur & ~control_mask) | (value & control_mask)
         self.data[self.DATA_ADCSRA] = cur & 0xFF
 
@@ -65,16 +70,23 @@ class _PeripheralsCtrlMixin:
         result = self._adc_channel_values[self._adc_conversion_channel] & 0x3FF
         adlar = (self.data[self.DATA_ADMUX] >> self.ADC_ADLAR_BIT) & 1
 
-        if adlar:
-            self.data[self.DATA_ADCH] = (result >> 2) & 0xFF
-            self.data[self.DATA_ADCL] = (result & 0x03) << 6
-        else:
-            self.data[self.DATA_ADCL] = result & 0xFF
-            self.data[self.DATA_ADCH] = (result >> 8) & 0x03
+        # A result that completes between the ADCL and ADCH reads is lost.
+        if not self._adc_locked:
+            if adlar:
+                self.data[self.DATA_ADCH] = (result >> 2) & 0xFF
+                self.data[self.DATA_ADCL] = (result & 0x03) << 6
+            else:
+                self.data[self.DATA_ADCL] = result & 0xFF
+                self.data[self.DATA_ADCH] = (result >> 8) & 0x03
 
         self.data[self.DATA_ADCSRA] &= ~(1 << self.ADC_ADSC_BIT)
         self.data[self.DATA_ADCSRA] |= 1 << self.ADC_ADIF_BIT
         self._adc_interrupt_pending = True
+
+        # Free-running mode: ADATE with trigger source 0 starts the next conversion.
+        adcsra = self.data[self.DATA_ADCSRA]
+        if ((adcsra >> self.ADC_ADATE_BIT) & 1) and ((adcsra >> self.ADC_ADEN_BIT) & 1) and (self.data[self.DATA_ADCSRB] & 0x07) == 0:
+            self._start_adc_conversion()
 
     def _advance_adc(self, cycles: int) -> None:
         if cycles <= 0:
@@ -172,10 +184,9 @@ class _PeripheralsCtrlMixin:
         div = {0: 4, 1: 16, 2: 64, 3: 128}[spr]
         if spi2x:
             div = max(1, div // 2)
-        # Eight SCK periods of `div` CPU cycles plus start-up and flag
-        # synchronisation. Measured on a real ATmega2560 at f/4: SPIF reads as set
-        # 33 to 38 cycles after the SPDR write.
-        return 8 * div + 2
+        # Eight SCK periods of `div` CPU cycles plus one cycle before SPIF can be
+        # read as set. Measured on a real ATmega2560 at f/2, f/4, f/8, f/16 and f/64.
+        return 8 * div + 1
 
     def _start_spi_transfer(self, value: int) -> None:
         self._spi_transfer_value = value & 0xFF
@@ -240,8 +251,17 @@ class _PeripheralsCtrlMixin:
     def _twi_set_status(self, status: int) -> None:
         self.data[self.DATA_TWSR] = (status & 0xF8) | (self.data[self.DATA_TWSR] & 0x03)
 
-    def _twi_operation_cycles(self) -> int:
-        return 2
+    def set_twi_devices(self, addresses) -> None:
+        """Set the 7-bit slave addresses that acknowledge (None: every address does)."""
+        self.twi_devices = None if addresses is None else {a & 0x7F for a in addresses}
+
+    def _twi_bit_cycles(self) -> int:
+        prescale = 4 ** (self.data[self.DATA_TWSR] & 0x03)
+        return 16 + 2 * self.data[self.DATA_TWBR] * prescale
+
+    def _twi_operation_cycles(self, kind: str = "data") -> int:
+        # One SCL period for a START condition, nine for a byte and its ACK bit.
+        return self._twi_bit_cycles() * (1 if kind == "start" else 9)
 
     def _twi_complete_start(self) -> None:
         repeated = self._twi_state != "idle"
@@ -254,6 +274,12 @@ class _PeripheralsCtrlMixin:
         value = self.data[self.DATA_TWDR] & 0xFF
         self._twi_last_address = (value >> 1) & 0x7F
         self._twi_rw = value & 1
+        if self.twi_devices is not None and self._twi_last_address not in self.twi_devices:
+            # Nobody answers: SLA+R / SLA+W transmitted, NACK received.
+            self._twi_state = "nack"
+            self._twi_set_status(0x48 if self._twi_rw else 0x20)
+            self._update_gpio_alt_overrides()
+            return
         if self._twi_rw:
             self._twi_state = "mr_addressed"
             self._twi_set_status(self.TWI_STATUS_MR_SLA_ACK)
@@ -303,7 +329,7 @@ class _PeripheralsCtrlMixin:
 
     def _start_twi_operation(self, kind: str) -> None:
         self._twi_operation_kind = kind
-        self._twi_operation_cycles_remaining = self._twi_operation_cycles()
+        self._twi_operation_cycles_remaining = self._twi_operation_cycles(kind)
         self.data[self.DATA_TWCR] &= ~(1 << self.TWCR_TWINT_BIT)
 
     def _write_twcr(self, value: int) -> None:
@@ -375,17 +401,15 @@ class _PeripheralsCtrlMixin:
     def _write_eecr(self, value: int) -> None:
         value &= 0xFF
         current = self.data[self.DATA_EECR]
+        mode_mask = (1 << self.EECR_EEPM0_BIT) | (1 << self.EECR_EEPM1_BIT)
 
         next_ctrl = current & ((1 << self.EECR_EEPE_BIT) | (1 << self.EECR_EEMPE_BIT))
-        next_ctrl &= ~(1 << self.EECR_EERIE_BIT)
-        next_ctrl &= ~((1 << self.EECR_EEPM0_BIT) | (1 << self.EECR_EEPM1_BIT))
-        next_ctrl |= value & (
-            (1 << self.EECR_EERIE_BIT)
-            | (1 << self.EECR_EEPM0_BIT)
-            | (1 << self.EECR_EEPM1_BIT)
-        )
+        next_ctrl |= value & ((1 << self.EECR_EERIE_BIT) | mode_mask)
 
         write_busy = self._eeprom_write_cycles_remaining > 0
+        if write_busy:
+            # The programming mode can't be changed during a write.
+            next_ctrl = (next_ctrl & ~mode_mask) | (current & mode_mask)
 
         if (value >> self.EECR_EEMPE_BIT) & 1 and not write_busy:
             next_ctrl |= 1 << self.EECR_EEMPE_BIT
@@ -395,15 +419,21 @@ class _PeripheralsCtrlMixin:
             addr = self._eeprom_addr()
             self._profile_record_eeprom_read(addr)
             self.data[self.DATA_EEDR] = self.eeprom[addr]
+            if self._step_pre is not None:
+                self._step_halt_cycles += self.EEPROM_READ_HALT_CYCLES
 
         eempe_active = ((next_ctrl >> self.EECR_EEMPE_BIT) & 1) == 1 and self._eeprom_eempe_window_cycles > 0
         if (value >> self.EECR_EEPE_BIT) & 1 and eempe_active and not write_busy:
+            mode = (next_ctrl >> self.EECR_EEPM0_BIT) & 0x03
             self._eeprom_write_addr = self._eeprom_addr()
             self._eeprom_write_value = self.data[self.DATA_EEDR] & 0xFF
-            self._eeprom_write_cycles_remaining = self.EEPROM_WRITE_CYCLES
+            self._eeprom_write_mode = mode
+            self._eeprom_write_cycles_remaining = self.EEPROM_WRITE_CYCLES if mode == 0 else self.EEPROM_HALF_WRITE_CYCLES
             next_ctrl |= 1 << self.EECR_EEPE_BIT
             next_ctrl &= ~(1 << self.EECR_EEMPE_BIT)
             self._eeprom_eempe_window_cycles = 0
+            if self._step_pre is not None:
+                self._step_halt_cycles += self.EEPROM_WRITE_HALT_CYCLES
 
         self.data[self.DATA_EECR] = next_ctrl & 0xFF
 
@@ -422,7 +452,14 @@ class _PeripheralsCtrlMixin:
         self._eeprom_write_cycles_remaining = max(0, self._eeprom_write_cycles_remaining - cycles)
         if self._eeprom_write_cycles_remaining == 0:
             self._profile_record_eeprom_write(self._eeprom_write_addr)
-            self.eeprom[self._eeprom_write_addr] = self._eeprom_write_value
+            # EEPM: 0 erase and write, 1 erase only, 2 write only (can only clear bits).
+            mode = getattr(self, "_eeprom_write_mode", 0)
+            if mode == 1:
+                self.eeprom[self._eeprom_write_addr] = 0xFF
+            elif mode == 2:
+                self.eeprom[self._eeprom_write_addr] &= self._eeprom_write_value
+            else:
+                self.eeprom[self._eeprom_write_addr] = self._eeprom_write_value
             self.data[self.DATA_EECR] &= ~(1 << self.EECR_EEPE_BIT)
             self._eeprom_ready_interrupt_pending = True
 

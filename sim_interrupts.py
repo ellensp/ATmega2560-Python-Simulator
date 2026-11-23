@@ -39,7 +39,7 @@ class _InterruptsMixin:
         data = self.data
 
         eifr_addr = 0x20 + self.IO_EIFR
-        pending = data[eifr_addr] & data[0x20 + self.IO_EIMSK]
+        pending = (data[eifr_addr] | self._ext_level_mask) & data[0x20 + self.IO_EIMSK]
         if pending:
             index = (pending & -pending).bit_length() - 1
             return (self._ext_int_vector(index), eifr_addr, 1 << index, None)

@@ -105,6 +105,7 @@ class TestTimer0(unittest.TestCase):
             emu.step()
 
         self.assertEqual(emu.data[0x20 + 0x26], 0x00)
+        emu.step()  # TOV is set on the timer clock after BOTTOM is reached
         self.assertEqual(emu.data[0x20 + 0x15] & 0x01, 0x01)
 
 

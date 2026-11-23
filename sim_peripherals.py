@@ -11,49 +11,244 @@ def _write16(data: bytearray, lo_addr: int, hi_addr: int, value: int) -> None:
     data[hi_addr] = (value >> 8) & 0xFF
 
 
-def _set_compare_flags_8bit(
-    data: bytearray,
-    tifr_idx: int,
-    value: int,
-    ocr_a: int,
-    ocr_b: int,
-    ocf_a_bit: int,
-    ocf_b_bit: int,
-) -> None:
-    if value == ocr_b:
-        data[tifr_idx] |= 1 << ocf_b_bit
-    if value == ocr_a:
-        data[tifr_idx] |= 1 << ocf_a_bit
+class _TimerBase:
+    """Clocking shared by all timers.
 
-
-def _set_compare_flags_16bit(
-    data: bytearray,
-    tifr_idx: int,
-    value: int,
-    ocr_a: int,
-    ocr_b: int,
-    ocr_c: int,
-    ocf_a_bit: int,
-    ocf_b_bit: int,
-    ocf_c_bit: int,
-) -> None:
-    if value == ocr_b:
-        data[tifr_idx] |= 1 << ocf_b_bit
-    if value == ocr_c:
-        data[tifr_idx] |= 1 << ocf_c_bit
-    if value == ocr_a:
-        data[tifr_idx] |= 1 << ocf_a_bit
-
-
-class Timer0:
-    """Minimal Timer/Counter0 model tied to CPU cycles.
-
-    Implemented behavior:
-    - Clock source selection via TCCR0B.CS02:0 (no clock / clk/1/8/64/256/1024)
-    - TCNT0 increment according to prescaler
-    - OCF0A/OCF0B set in TIFR0 when TCNT0 matches OCR0A/OCR0B
-    - TOV0 set in TIFR0 on 0xFF -> 0x00 overflow
+    Timer0, 1, 3, 4 and 5 count edges of one shared prescaler, so the position
+    of a prescaled tick does not depend on when a timer was started. Measured
+    on a real ATmega2560: that prescaler only runs while at least one of those
+    timers has a clock selected, and keeps its count while they are all stopped.
+    The emulator passes its count before the cycles being advanced.
     """
+
+    SHARED_PRESCALER = True
+
+    _PRESCALE = {
+        0b001: 1,
+        0b010: 8,
+        0b011: 64,
+        0b100: 256,
+        0b101: 1024,
+    }
+
+    def __init__(self) -> None:
+        self._prescaler_accum = 0
+        self._count_up = True
+        # A write to TCNT blocks the compare match on the next timer clock.
+        self._compare_block = False
+
+    def reset(self) -> None:
+        self._prescaler_accum = 0
+        self._count_up = True
+        self._compare_block = False
+
+    def _ticks(self, cycles: int, div: int, prescaler: int | None) -> int:
+        if div == 1:
+            return cycles
+        if prescaler is None or not self.SHARED_PRESCALER:
+            self._prescaler_accum += cycles
+            ticks = self._prescaler_accum // div
+            self._prescaler_accum -= ticks * div
+            return ticks
+        return (prescaler + cycles) // div - prescaler // div
+
+
+class _Timer8(_TimerBase):
+    """8-bit timer: normal, CTC, fast PWM and phase-correct PWM counting.
+
+    Compare flags are set on the timer clock after the match, so the counter
+    stays at TOP for a full clock and a period is TOP + 1 clocks (2 * TOP in the
+    phase-correct modes). TOV is set at the MAX/TOP wrap, or at BOTTOM in the
+    phase-correct modes. The OCnx output pins are not modelled.
+    """
+
+    def _advance8(
+        self,
+        cycles: int,
+        data: bytearray,
+        prescaler: int | None,
+        tccra: int,
+        tccrb: int,
+        tcnt: int,
+        ocra: int,
+        ocrb: int,
+        tifr: int,
+        div: int | None,
+    ) -> None:
+        if cycles <= 0 or div is None:
+            return
+        ticks = self._ticks(cycles, div, prescaler)
+        if not ticks:
+            return
+
+        mode = (((data[tccrb] >> 3) & 1) << 2) | (data[tccra] & 0x03)
+        ctc = mode == 0b010
+        fast = mode in (0b011, 0b111)
+        phase = mode in (0b001, 0b101)
+        ocra_top = mode in (0b101, 0b111)
+
+        for _ in range(ticks):
+            cur = data[tcnt]
+            ocra_val = data[ocra]
+            if self._compare_block:
+                self._compare_block = False
+            else:
+                if cur == data[ocrb]:
+                    data[tifr] |= 0x04
+                if cur == ocra_val:
+                    data[tifr] |= 0x02
+            top = ocra_val if ocra_top else 0xFF
+
+            if phase:
+                if cur == 0:
+                    data[tifr] |= 0x01
+                    self._count_up = True
+                if self._count_up and cur >= top:
+                    self._count_up = False
+                if self._count_up:
+                    data[tcnt] = cur + 1
+                else:
+                    data[tcnt] = cur - 1 if cur > 0 else 0
+            elif ctc and cur == ocra_val:
+                data[tcnt] = 0
+            elif fast:
+                if cur >= top:
+                    data[tcnt] = 0
+                    data[tifr] |= 0x01
+                else:
+                    data[tcnt] = cur + 1
+            else:
+                nxt = (cur + 1) & 0xFF
+                data[tcnt] = nxt
+                if nxt == 0:
+                    data[tifr] |= 0x01
+
+
+class _Timer16(_TimerBase):
+    """16-bit timer covering all sixteen waveform generation modes: counting
+    sequence and the TOV, OCF and ICF flags. The OCnx output pins and the OCR
+    double buffering of the PWM modes are not modelled.
+
+    Measured on a real ATmega2560: every mode has a period of TOP + 1 timer
+    clocks (2 * TOP in the phase-correct modes), compare flags are set on the
+    clock after the match, and a TCNT write blocks the match on the next clock.
+    """
+
+    _N = 1
+
+    # WGMn3:0 -> (counting, TOP): TOP is a fixed value, "ocra" or "icr".
+    _MODES = {
+        0: ("normal", None),
+        1: ("phase", 0x00FF),
+        2: ("phase", 0x01FF),
+        3: ("phase", 0x03FF),
+        4: ("ctc", "ocra"),
+        5: ("fast", 0x00FF),
+        6: ("fast", 0x01FF),
+        7: ("fast", 0x03FF),
+        8: ("phase", "icr"),
+        9: ("phase", "ocra"),
+        10: ("phase", "icr"),
+        11: ("phase", "ocra"),
+        12: ("ctc", "icr"),
+        13: ("normal", None),
+        14: ("fast", "icr"),
+        15: ("fast", "ocra"),
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        n = self._N
+        self._tccra = getattr(self, f"DATA_TCCR{n}A")
+        self._tccrb = getattr(self, f"DATA_TCCR{n}B")
+        self._tcnt = getattr(self, f"DATA_TCNT{n}L")
+        self._icr = getattr(self, f"DATA_ICR{n}L")
+        self._ocra = getattr(self, f"DATA_OCR{n}AL")
+        self._ocrb = getattr(self, f"DATA_OCR{n}BL")
+        self._ocrc = getattr(self, f"DATA_OCR{n}CL")
+        self._tifr = 0x20 + getattr(self, f"IO_TIFR{n}")
+
+    def advance(self, cycles: int, data: bytearray, prescaler: int | None = None) -> None:
+        if cycles <= 0:
+            return
+        tccrb = data[self._tccrb]
+        div = self._PRESCALE.get(tccrb & 0x7)
+        if div is None:
+            return
+        ticks = self._ticks(cycles, div, prescaler)
+        if not ticks:
+            return
+
+        kind, top_src = self._MODES[(((tccrb >> 3) & 0x3) << 2) | (data[self._tccra] & 0x3)]
+        tcnt = self._tcnt
+        tifr = self._tifr
+        ocra = self._ocra
+        ocrb = self._ocrb
+        ocrc = self._ocrc
+        icr = self._icr
+        icr_top = top_src == "icr"
+
+        for _ in range(ticks):
+            cur = data[tcnt] | (data[tcnt + 1] << 8)
+            ocra_val = data[ocra] | (data[ocra + 1] << 8)
+            if self._compare_block:
+                self._compare_block = False
+            else:
+                if cur == ocra_val:
+                    data[tifr] |= 0x02
+                if cur == (data[ocrb] | (data[ocrb + 1] << 8)):
+                    data[tifr] |= 0x04
+                if cur == (data[ocrc] | (data[ocrc + 1] << 8)):
+                    data[tifr] |= 0x08
+
+            if kind == "normal":
+                nxt = (cur + 1) & 0xFFFF
+                if nxt == 0:
+                    data[tifr] |= 0x01
+            else:
+                if top_src == "ocra":
+                    top = ocra_val
+                elif icr_top:
+                    top = data[icr] | (data[icr + 1] << 8)
+                else:
+                    top = top_src
+
+                if kind == "ctc":
+                    if cur == top:
+                        nxt = 0
+                        if icr_top:
+                            data[tifr] |= 0x20
+                    else:
+                        nxt = (cur + 1) & 0xFFFF
+                        if nxt == 0:
+                            data[tifr] |= 0x01
+                elif kind == "fast":
+                    if cur >= top:
+                        nxt = 0
+                        data[tifr] |= 0x01
+                        if icr_top:
+                            data[tifr] |= 0x20
+                    else:
+                        nxt = cur + 1
+                else:  # phase-correct: up to TOP, down to BOTTOM
+                    if cur == 0:
+                        data[tifr] |= 0x01
+                        self._count_up = True
+                    if self._count_up and cur >= top:
+                        self._count_up = False
+                        if icr_top:
+                            data[tifr] |= 0x20
+                    if self._count_up:
+                        nxt = cur + 1
+                    else:
+                        nxt = cur - 1 if cur > 0 else 0
+
+            data[tcnt] = nxt & 0xFF
+            data[tcnt + 1] = (nxt >> 8) & 0xFF
+
+
+class Timer0(_Timer8):
+    """Timer/Counter0 (8-bit, see _Timer8)."""
 
     IO_TIFR0 = 0x15
     IO_TCCR0A = 0x24
@@ -68,106 +263,19 @@ class Timer0:
     OCF0A_BIT = 1
     OCF0B_BIT = 2
 
-    _PRESCALE = {
-        0b001: 1,
-        0b010: 8,
-        0b011: 64,
-        0b100: 256,
-        0b101: 1024,
-    }
-
-    def __init__(self) -> None:
-        self._prescaler_accum = 0
-        self._count_up = True
-
-    def reset(self) -> None:
-        self._prescaler_accum = 0
-        self._count_up = True
-
-    def advance(self, cycles: int, data: bytearray) -> None:
-        if cycles <= 0:
-            return
-
-        tccr0b = data[0x20 + self.IO_TCCR0B]
-        cs = tccr0b & 0x7
-        div = self._PRESCALE.get(cs)
-        if div is None:
-            return
-
-        self._prescaler_accum += cycles
-        tccr0a = data[0x20 + self.IO_TCCR0A]
-        wgm00 = (tccr0a >> 0) & 1
-        wgm01 = (tccr0a >> 1) & 1
-        wgm02 = (tccr0b >> 3) & 1
-        mode = (wgm02 << 2) | (wgm01 << 1) | wgm00
-        ctc_mode = mode == 0b010
-        fast_pwm_mode = mode in (0b011, 0b111)
-        phase_correct_mode = mode in (0b001, 0b101)
-
-        top = 0xFF
-        if mode in (0b101, 0b111):
-            top = data[0x20 + self.IO_OCR0A]
-            if top == 0:
-                top = 1
-
-        tcnt_idx = 0x20 + self.IO_TCNT0
-        tifr_idx = 0x20 + self.IO_TIFR0
-
-        while self._prescaler_accum >= div:
-            self._prescaler_accum -= div
-            cur = data[tcnt_idx]
-            ocr_a = data[0x20 + self.IO_OCR0A]
-            ocr_b = data[0x20 + self.IO_OCR0B]
-
-            if phase_correct_mode:
-                if self._count_up:
-                    next_val = cur + 1
-                    if next_val >= top:
-                        next_val = top
-                        self._count_up = False
-                else:
-                    next_val = cur - 1 if cur > 0 else 0
-                    if next_val == 0:
-                        self._count_up = True
-                        data[tifr_idx] |= 1 << self.TOV0_BIT
-
-                next_val &= 0xFF
-                data[tcnt_idx] = next_val
-                _set_compare_flags_8bit(data, tifr_idx, next_val, ocr_a, ocr_b, self.OCF0A_BIT, self.OCF0B_BIT)
-                continue
-
-            # A compare flag is set on the timer clock after the match, so the
-            # counter stays at OCR0A for a full clock in CTC mode (period OCR0A + 1).
-            _set_compare_flags_8bit(data, tifr_idx, cur, ocr_a, ocr_b, self.OCF0A_BIT, self.OCF0B_BIT)
-
-            if ctc_mode and cur == ocr_a:
-                data[tcnt_idx] = 0
-                continue
-
-            if fast_pwm_mode:
-                if cur >= top:
-                    data[tcnt_idx] = 0
-                    data[tifr_idx] |= 1 << self.TOV0_BIT
-                else:
-                    data[tcnt_idx] = cur + 1
-                continue
-
-            next_val = (cur + 1) & 0xFF
-            data[tcnt_idx] = next_val
-            if next_val == 0:
-                data[tifr_idx] |= 1 << self.TOV0_BIT
+    def advance(self, cycles: int, data: bytearray, prescaler: int | None = None) -> None:
+        div = self._PRESCALE.get(data[0x20 + self.IO_TCCR0B] & 0x7)
+        self._advance8(
+            cycles, data, prescaler,
+            0x20 + self.IO_TCCR0A, 0x20 + self.IO_TCCR0B, 0x20 + self.IO_TCNT0,
+            0x20 + self.IO_OCR0A, 0x20 + self.IO_OCR0B, 0x20 + self.IO_TIFR0, div,
+        )
 
 
-class Timer1:
-    """Baseline Timer/Counter1 model tied to CPU cycles.
+class Timer1(_Timer16):
+    """Timer/Counter1 (16-bit, see _Timer16)."""
 
-    Implemented behavior:
-    - Clock source selection via TCCR1B.CS12:0 (clk/1/8/64/256/1024)
-    - 16-bit TCNT1 increment according to prescaler
-    - OCF1A/OCF1B/OCF1C set in TIFR1 on OCR1A/B/C compare match
-    - TOV1 set in TIFR1 on 0xFFFF -> 0x0000 overflow
-    - CTC baseline for WGM13:0 == 0b0100 (clear on OCR1A compare)
-    """
+    _N = 1
 
     IO_TIFR1 = 0x16
     DATA_TIMSK1 = 0x006F
@@ -191,100 +299,12 @@ class Timer1:
     OCF1C_BIT = 3
     ICF1_BIT = 5
 
-    _PRESCALE = {
-        0b001: 1,
-        0b010: 8,
-        0b011: 64,
-        0b100: 256,
-        0b101: 1024,
-    }
 
-    def __init__(self) -> None:
-        self._prescaler_accum = 0
-        self._count_up = True
+class Timer2(_Timer8):
+    """Timer/Counter2 (8-bit, see _Timer8). It has its own prescaler; with ASSR.AS2
+    set the 32.768 kHz crystal clock is approximated as CPU clock / 128."""
 
-    def reset(self) -> None:
-        self._prescaler_accum = 0
-        self._count_up = True
-
-    def advance(self, cycles: int, data: bytearray) -> None:
-        if cycles <= 0:
-            return
-
-        tccr1b = data[self.DATA_TCCR1B]
-        cs = tccr1b & 0x7
-        div = self._PRESCALE.get(cs)
-        if div is None:
-            return
-
-        tccr1a = data[self.DATA_TCCR1A]
-        wgm10 = (tccr1a >> 0) & 1
-        wgm11 = (tccr1a >> 1) & 1
-        wgm12 = (tccr1b >> 3) & 1
-        wgm13 = (tccr1b >> 4) & 1
-        mode = (wgm13 << 3) | (wgm12 << 2) | (wgm11 << 1) | wgm10
-        ctc_mode = mode == 0b0100
-        fast_pwm_top = {0b0101: 0x00FF, 0b0110: 0x01FF, 0b0111: 0x03FF}.get(mode)
-        phase_correct_top = {0b0001: 0x00FF, 0b0010: 0x01FF, 0b0011: 0x03FF}.get(mode)
-
-        tifr1_idx = 0x20 + self.IO_TIFR1
-        self._prescaler_accum += cycles
-
-        while self._prescaler_accum >= div:
-            self._prescaler_accum -= div
-
-            cur = _read16(data, self.DATA_TCNT1L, self.DATA_TCNT1H)
-            ocr1a = _read16(data, self.DATA_OCR1AL, self.DATA_OCR1AH)
-            ocr1b = _read16(data, self.DATA_OCR1BL, self.DATA_OCR1BH)
-            ocr1c = _read16(data, self.DATA_OCR1CL, self.DATA_OCR1CH)
-
-            if phase_correct_top is not None:
-                top = phase_correct_top
-                if self._count_up:
-                    nxt = cur + 1
-                    if nxt >= top:
-                        nxt = top
-                        self._count_up = False
-                else:
-                    nxt = cur - 1 if cur > 0 else 0
-                    if nxt == 0:
-                        self._count_up = True
-                        data[tifr1_idx] |= 1 << self.TOV1_BIT
-                _write16(data, self.DATA_TCNT1L, self.DATA_TCNT1H, nxt)
-                _set_compare_flags_16bit(data, tifr1_idx, nxt, ocr1a, ocr1b, ocr1c, self.OCF1A_BIT, self.OCF1B_BIT, self.OCF1C_BIT)
-                continue
-
-            # Compare flags are set on the timer clock after the match (see Timer0).
-            _set_compare_flags_16bit(data, tifr1_idx, cur, ocr1a, ocr1b, ocr1c, self.OCF1A_BIT, self.OCF1B_BIT, self.OCF1C_BIT)
-
-            if ctc_mode and cur == ocr1a:
-                _write16(data, self.DATA_TCNT1L, self.DATA_TCNT1H, 0)
-                continue
-
-            if fast_pwm_top is not None:
-                if cur >= fast_pwm_top:
-                    _write16(data, self.DATA_TCNT1L, self.DATA_TCNT1H, 0)
-                    data[tifr1_idx] |= 1 << self.TOV1_BIT
-                else:
-                    _write16(data, self.DATA_TCNT1L, self.DATA_TCNT1H, cur + 1)
-                continue
-
-            nxt = (cur + 1) & 0xFFFF
-            _write16(data, self.DATA_TCNT1L, self.DATA_TCNT1H, nxt)
-            if nxt == 0:
-                data[tifr1_idx] |= 1 << self.TOV1_BIT
-
-
-class Timer2:
-    """Baseline Timer/Counter2 model tied to CPU cycles.
-
-    Implemented behavior:
-    - Clock source selection via TCCR2B.CS22:0 (clk/1/8/32/64/128/256/1024)
-    - 8-bit TCNT2 increment according to prescaler
-    - OCF2A/OCF2B set in TIFR2 on OCR2A/OCR2B compare match
-    - TOV2 set in TIFR2 on 0xFF -> 0x00 overflow
-    - CTC baseline for WGM22:0 == 0b010 (clear on OCR2A compare)
-    """
+    SHARED_PRESCALER = False
 
     IO_TIFR2 = 0x17
     DATA_TIMSK2 = 0x0070
@@ -315,100 +335,21 @@ class Timer2:
     # Baseline approximation for asynchronous Timer2 domain versus CPU cycles.
     _ASYNC_SCALE = 128
 
-    def __init__(self) -> None:
-        self._prescaler_accum = 0
-        self._count_up = True
-
-    def reset(self) -> None:
-        self._prescaler_accum = 0
-        self._count_up = True
-
-    def advance(self, cycles: int, data: bytearray) -> None:
-        if cycles <= 0:
-            return
-
-        tccr2b = data[self.DATA_TCCR2B]
-        cs = tccr2b & 0x7
-        div = self._PRESCALE.get(cs)
-        if div is None:
-            return
-
-        if ((data[self.DATA_ASSR] >> self.AS2_BIT) & 1) == 1:
+    def advance(self, cycles: int, data: bytearray, prescaler: int | None = None) -> None:
+        div = self._PRESCALE.get(data[self.DATA_TCCR2B] & 0x7)
+        if div is not None and ((data[self.DATA_ASSR] >> self.AS2_BIT) & 1) == 1:
             div *= self._ASYNC_SCALE
-
-        tccr2a = data[self.DATA_TCCR2A]
-        wgm20 = (tccr2a >> 0) & 1
-        wgm21 = (tccr2a >> 1) & 1
-        wgm22 = (tccr2b >> 3) & 1
-        mode = (wgm22 << 2) | (wgm21 << 1) | wgm20
-        ctc_mode = mode == 0b010
-        fast_pwm_mode = mode in (0b011, 0b111)
-        phase_correct_mode = mode in (0b001, 0b101)
-
-        top = 0xFF
-        if mode in (0b101, 0b111):
-            top = data[self.DATA_OCR2A]
-            if top == 0:
-                top = 1
-
-        tifr2_idx = 0x20 + self.IO_TIFR2
-        self._prescaler_accum += cycles
-
-        while self._prescaler_accum >= div:
-            self._prescaler_accum -= div
-
-            cur = data[self.DATA_TCNT2]
-            ocr_a = data[self.DATA_OCR2A]
-            ocr_b = data[self.DATA_OCR2B]
-
-            if phase_correct_mode:
-                if self._count_up:
-                    nxt = cur + 1
-                    if nxt >= top:
-                        nxt = top
-                        self._count_up = False
-                else:
-                    nxt = cur - 1 if cur > 0 else 0
-                    if nxt == 0:
-                        self._count_up = True
-                        data[tifr2_idx] |= 1 << self.TOV2_BIT
-
-                nxt &= 0xFF
-                data[self.DATA_TCNT2] = nxt
-                _set_compare_flags_8bit(data, tifr2_idx, nxt, ocr_a, ocr_b, self.OCF2A_BIT, self.OCF2B_BIT)
-                continue
-
-            # Compare flags are set on the timer clock after the match (see Timer0).
-            _set_compare_flags_8bit(data, tifr2_idx, cur, ocr_a, ocr_b, self.OCF2A_BIT, self.OCF2B_BIT)
-
-            if ctc_mode and cur == ocr_a:
-                data[self.DATA_TCNT2] = 0
-                continue
-
-            if fast_pwm_mode:
-                if cur >= top:
-                    data[self.DATA_TCNT2] = 0
-                    data[tifr2_idx] |= 1 << self.TOV2_BIT
-                else:
-                    data[self.DATA_TCNT2] = cur + 1
-                continue
-
-            nxt = (cur + 1) & 0xFF
-            data[self.DATA_TCNT2] = nxt
-            if nxt == 0:
-                data[tifr2_idx] |= 1 << self.TOV2_BIT
+        self._advance8(
+            cycles, data, None,
+            self.DATA_TCCR2A, self.DATA_TCCR2B, self.DATA_TCNT2,
+            self.DATA_OCR2A, self.DATA_OCR2B, 0x20 + self.IO_TIFR2, div,
+        )
 
 
-class Timer3:
-    """Baseline Timer/Counter3 model tied to CPU cycles.
+class Timer3(_Timer16):
+    """Timer/Counter3 (16-bit, see _Timer16)."""
 
-    Implemented behavior:
-    - Clock source selection via TCCR3B.CS32:0 (clk/1/8/64/256/1024)
-    - 16-bit TCNT3 increment according to prescaler
-    - OCF3A/OCF3B/OCF3C set in TIFR3 on OCR3A/B/C compare match
-    - TOV3 set in TIFR3 on 0xFFFF -> 0x0000 overflow
-    - CTC baseline for WGM33:0 == 0b0100 (clear on OCR3A compare)
-    """
+    _N = 3
 
     IO_TIFR3 = 0x18
     DATA_TIMSK3 = 0x0071
@@ -432,92 +373,11 @@ class Timer3:
     OCF3C_BIT = 3
     ICF3_BIT = 5
 
-    _PRESCALE = {
-        0b001: 1,
-        0b010: 8,
-        0b011: 64,
-        0b100: 256,
-        0b101: 1024,
-    }
 
-    def __init__(self) -> None:
-        self._prescaler_accum = 0
-        self._count_up = True
+class Timer4(_Timer16):
+    """Timer/Counter4 (16-bit, see _Timer16)."""
 
-    def reset(self) -> None:
-        self._prescaler_accum = 0
-        self._count_up = True
-
-    def advance(self, cycles: int, data: bytearray) -> None:
-        if cycles <= 0:
-            return
-
-        tccr3b = data[self.DATA_TCCR3B]
-        cs = tccr3b & 0x7
-        div = self._PRESCALE.get(cs)
-        if div is None:
-            return
-
-        tccr3a = data[self.DATA_TCCR3A]
-        wgm30 = (tccr3a >> 0) & 1
-        wgm31 = (tccr3a >> 1) & 1
-        wgm32 = (tccr3b >> 3) & 1
-        wgm33 = (tccr3b >> 4) & 1
-        mode = (wgm33 << 3) | (wgm32 << 2) | (wgm31 << 1) | wgm30
-        ctc_mode = mode == 0b0100
-        fast_pwm_top = {0b0101: 0x00FF, 0b0110: 0x01FF, 0b0111: 0x03FF}.get(mode)
-        phase_correct_top = {0b0001: 0x00FF, 0b0010: 0x01FF, 0b0011: 0x03FF}.get(mode)
-
-        tifr3_idx = 0x20 + self.IO_TIFR3
-        self._prescaler_accum += cycles
-
-        while self._prescaler_accum >= div:
-            self._prescaler_accum -= div
-
-            cur = _read16(data, self.DATA_TCNT3L, self.DATA_TCNT3H)
-            ocr3a = _read16(data, self.DATA_OCR3AL, self.DATA_OCR3AH)
-            ocr3b = _read16(data, self.DATA_OCR3BL, self.DATA_OCR3BH)
-            ocr3c = _read16(data, self.DATA_OCR3CL, self.DATA_OCR3CH)
-
-            if phase_correct_top is not None:
-                top = phase_correct_top
-                if self._count_up:
-                    nxt = cur + 1
-                    if nxt >= top:
-                        nxt = top
-                        self._count_up = False
-                else:
-                    nxt = cur - 1 if cur > 0 else 0
-                    if nxt == 0:
-                        self._count_up = True
-                        data[tifr3_idx] |= 1 << self.TOV3_BIT
-                _write16(data, self.DATA_TCNT3L, self.DATA_TCNT3H, nxt)
-                _set_compare_flags_16bit(data, tifr3_idx, nxt, ocr3a, ocr3b, ocr3c, self.OCF3A_BIT, self.OCF3B_BIT, self.OCF3C_BIT)
-                continue
-
-            # Compare flags are set on the timer clock after the match (see Timer0).
-            _set_compare_flags_16bit(data, tifr3_idx, cur, ocr3a, ocr3b, ocr3c, self.OCF3A_BIT, self.OCF3B_BIT, self.OCF3C_BIT)
-
-            if ctc_mode and cur == ocr3a:
-                _write16(data, self.DATA_TCNT3L, self.DATA_TCNT3H, 0)
-                continue
-
-            if fast_pwm_top is not None:
-                if cur >= fast_pwm_top:
-                    _write16(data, self.DATA_TCNT3L, self.DATA_TCNT3H, 0)
-                    data[tifr3_idx] |= 1 << self.TOV3_BIT
-                else:
-                    _write16(data, self.DATA_TCNT3L, self.DATA_TCNT3H, cur + 1)
-                continue
-
-            nxt = (cur + 1) & 0xFFFF
-            _write16(data, self.DATA_TCNT3L, self.DATA_TCNT3H, nxt)
-            if nxt == 0:
-                data[tifr3_idx] |= 1 << self.TOV3_BIT
-
-
-class Timer4:
-    """Baseline Timer/Counter4 model tied to CPU cycles."""
+    _N = 4
 
     IO_TIFR4 = 0x19
     DATA_TIMSK4 = 0x0072
@@ -541,92 +401,11 @@ class Timer4:
     OCF4C_BIT = 3
     ICF4_BIT = 5
 
-    _PRESCALE = {
-        0b001: 1,
-        0b010: 8,
-        0b011: 64,
-        0b100: 256,
-        0b101: 1024,
-    }
 
-    def __init__(self) -> None:
-        self._prescaler_accum = 0
-        self._count_up = True
+class Timer5(_Timer16):
+    """Timer/Counter5 (16-bit, see _Timer16)."""
 
-    def reset(self) -> None:
-        self._prescaler_accum = 0
-        self._count_up = True
-
-    def advance(self, cycles: int, data: bytearray) -> None:
-        if cycles <= 0:
-            return
-
-        tccr4b = data[self.DATA_TCCR4B]
-        cs = tccr4b & 0x7
-        div = self._PRESCALE.get(cs)
-        if div is None:
-            return
-
-        tccr4a = data[self.DATA_TCCR4A]
-        wgm40 = (tccr4a >> 0) & 1
-        wgm41 = (tccr4a >> 1) & 1
-        wgm42 = (tccr4b >> 3) & 1
-        wgm43 = (tccr4b >> 4) & 1
-        mode = (wgm43 << 3) | (wgm42 << 2) | (wgm41 << 1) | wgm40
-        ctc_mode = mode == 0b0100
-        fast_pwm_top = {0b0101: 0x00FF, 0b0110: 0x01FF, 0b0111: 0x03FF}.get(mode)
-        phase_correct_top = {0b0001: 0x00FF, 0b0010: 0x01FF, 0b0011: 0x03FF}.get(mode)
-
-        tifr4_idx = 0x20 + self.IO_TIFR4
-        self._prescaler_accum += cycles
-
-        while self._prescaler_accum >= div:
-            self._prescaler_accum -= div
-
-            cur = _read16(data, self.DATA_TCNT4L, self.DATA_TCNT4H)
-            ocr4a = _read16(data, self.DATA_OCR4AL, self.DATA_OCR4AH)
-            ocr4b = _read16(data, self.DATA_OCR4BL, self.DATA_OCR4BH)
-            ocr4c = _read16(data, self.DATA_OCR4CL, self.DATA_OCR4CH)
-
-            if phase_correct_top is not None:
-                top = phase_correct_top
-                if self._count_up:
-                    nxt = cur + 1
-                    if nxt >= top:
-                        nxt = top
-                        self._count_up = False
-                else:
-                    nxt = cur - 1 if cur > 0 else 0
-                    if nxt == 0:
-                        self._count_up = True
-                        data[tifr4_idx] |= 1 << self.TOV4_BIT
-                _write16(data, self.DATA_TCNT4L, self.DATA_TCNT4H, nxt)
-                _set_compare_flags_16bit(data, tifr4_idx, nxt, ocr4a, ocr4b, ocr4c, self.OCF4A_BIT, self.OCF4B_BIT, self.OCF4C_BIT)
-                continue
-
-            # Compare flags are set on the timer clock after the match (see Timer0).
-            _set_compare_flags_16bit(data, tifr4_idx, cur, ocr4a, ocr4b, ocr4c, self.OCF4A_BIT, self.OCF4B_BIT, self.OCF4C_BIT)
-
-            if ctc_mode and cur == ocr4a:
-                _write16(data, self.DATA_TCNT4L, self.DATA_TCNT4H, 0)
-                continue
-
-            if fast_pwm_top is not None:
-                if cur >= fast_pwm_top:
-                    _write16(data, self.DATA_TCNT4L, self.DATA_TCNT4H, 0)
-                    data[tifr4_idx] |= 1 << self.TOV4_BIT
-                else:
-                    _write16(data, self.DATA_TCNT4L, self.DATA_TCNT4H, cur + 1)
-                continue
-
-            nxt = (cur + 1) & 0xFFFF
-            _write16(data, self.DATA_TCNT4L, self.DATA_TCNT4H, nxt)
-            if nxt == 0:
-                data[tifr4_idx] |= 1 << self.TOV4_BIT
-
-
-class Timer5:
-    """Baseline Timer/Counter5 model tied to CPU cycles."""
+    _N = 5
 
     IO_TIFR5 = 0x1A
     DATA_TIMSK5 = 0x0073
@@ -649,89 +428,6 @@ class Timer5:
     OCF5B_BIT = 2
     OCF5C_BIT = 3
     ICF5_BIT = 5
-
-    _PRESCALE = {
-        0b001: 1,
-        0b010: 8,
-        0b011: 64,
-        0b100: 256,
-        0b101: 1024,
-    }
-
-    def __init__(self) -> None:
-        self._prescaler_accum = 0
-        self._count_up = True
-
-    def reset(self) -> None:
-        self._prescaler_accum = 0
-        self._count_up = True
-
-    def advance(self, cycles: int, data: bytearray) -> None:
-        if cycles <= 0:
-            return
-
-        tccr5b = data[self.DATA_TCCR5B]
-        cs = tccr5b & 0x7
-        div = self._PRESCALE.get(cs)
-        if div is None:
-            return
-
-        tccr5a = data[self.DATA_TCCR5A]
-        wgm50 = (tccr5a >> 0) & 1
-        wgm51 = (tccr5a >> 1) & 1
-        wgm52 = (tccr5b >> 3) & 1
-        wgm53 = (tccr5b >> 4) & 1
-        mode = (wgm53 << 3) | (wgm52 << 2) | (wgm51 << 1) | wgm50
-        ctc_mode = mode == 0b0100
-        fast_pwm_top = {0b0101: 0x00FF, 0b0110: 0x01FF, 0b0111: 0x03FF}.get(mode)
-        phase_correct_top = {0b0001: 0x00FF, 0b0010: 0x01FF, 0b0011: 0x03FF}.get(mode)
-
-        tifr5_idx = 0x20 + self.IO_TIFR5
-        self._prescaler_accum += cycles
-
-        while self._prescaler_accum >= div:
-            self._prescaler_accum -= div
-
-            cur = _read16(data, self.DATA_TCNT5L, self.DATA_TCNT5H)
-            ocr5a = _read16(data, self.DATA_OCR5AL, self.DATA_OCR5AH)
-            ocr5b = _read16(data, self.DATA_OCR5BL, self.DATA_OCR5BH)
-            ocr5c = _read16(data, self.DATA_OCR5CL, self.DATA_OCR5CH)
-
-            if phase_correct_top is not None:
-                top = phase_correct_top
-                if self._count_up:
-                    nxt = cur + 1
-                    if nxt >= top:
-                        nxt = top
-                        self._count_up = False
-                else:
-                    nxt = cur - 1 if cur > 0 else 0
-                    if nxt == 0:
-                        self._count_up = True
-                        data[tifr5_idx] |= 1 << self.TOV5_BIT
-                _write16(data, self.DATA_TCNT5L, self.DATA_TCNT5H, nxt)
-                _set_compare_flags_16bit(data, tifr5_idx, nxt, ocr5a, ocr5b, ocr5c, self.OCF5A_BIT, self.OCF5B_BIT, self.OCF5C_BIT)
-                continue
-
-            # Compare flags are set on the timer clock after the match (see Timer0).
-            _set_compare_flags_16bit(data, tifr5_idx, cur, ocr5a, ocr5b, ocr5c, self.OCF5A_BIT, self.OCF5B_BIT, self.OCF5C_BIT)
-
-            if ctc_mode and cur == ocr5a:
-                _write16(data, self.DATA_TCNT5L, self.DATA_TCNT5H, 0)
-                continue
-
-            if fast_pwm_top is not None:
-                if cur >= fast_pwm_top:
-                    _write16(data, self.DATA_TCNT5L, self.DATA_TCNT5H, 0)
-                    data[tifr5_idx] |= 1 << self.TOV5_BIT
-                else:
-                    _write16(data, self.DATA_TCNT5L, self.DATA_TCNT5H, cur + 1)
-                continue
-
-            nxt = (cur + 1) & 0xFFFF
-            _write16(data, self.DATA_TCNT5L, self.DATA_TCNT5H, nxt)
-            if nxt == 0:
-                data[tifr5_idx] |= 1 << self.TOV5_BIT
 
 
 class WatchdogTimer:
@@ -781,7 +477,9 @@ class WatchdogTimer:
     def reset(self, data: bytearray, watchdog_reset: bool = False) -> None:
         self._cfg_window_cycles = 0
         self._combined_second_stage = False
-        data[self.DATA_WDTCSR] = 0
+        # After a watchdog reset the watchdog stays enabled at the shortest timeout:
+        # WDRF forces WDE until the firmware clears MCUSR.
+        data[self.DATA_WDTCSR] = (1 << self.WDE_BIT) if watchdog_reset else 0
 
         if watchdog_reset:
             data[self.DATA_MCUSR] |= 1 << self.WDRF_BIT
@@ -829,6 +527,8 @@ class WatchdogTimer:
             nxt |= value & (1 << self.WDE_BIT)
             nxt |= value & (1 << self.WDP3_BIT)
             nxt |= value & 0x07
+            if data[self.DATA_MCUSR] & (1 << self.WDRF_BIT):
+                nxt |= 1 << self.WDE_BIT  # WDE can't be cleared while WDRF is set
             data[self.DATA_WDTCSR] = nxt
 
             self._cfg_window_cycles = 0
@@ -876,10 +576,20 @@ class WatchdogTimer:
 
 
 class UARTBase:
-    """Minimal USART TX/RX model shared across USART0..USART3."""
+    """USART transmitter with real frame timing, and a simple receiver.
+
+    The baud-rate generator divides the CPU clock by UBRR + 1 and restarts when
+    UBRRnL is written. A byte written to UDR moves to the shift register at once
+    if that is idle (UDRE stays set); its start bit begins on the next generator
+    tick and each bit lasts 16 ticks (8 with U2X). TXC is set at the end of the
+    frame when no further byte is waiting. Received bytes are injected whole.
+    """
 
     DATA_UCSRA = 0
     DATA_UCSRB = 0
+    DATA_UCSRC = 0
+    DATA_UBRRL = 0
+    DATA_UBRRH = 0
     DATA_UDR = 0
 
     UDRE_BIT = 5
@@ -891,16 +601,53 @@ class UARTBase:
     TXEN_BIT = 3
     RXEN_BIT = 4
 
+    # Fitted to a real ATmega2560 (examples/hwcheck, uf2_*, ut_* and uq_*): the
+    # generator restarts two cycles after the UBRRnL write, a byte written less
+    # than two cycles before a tick waits for the next one, and a byte waiting
+    # in UDR moves to the shift register (setting UDRE) three cycles before TXC
+    # time. Frame length and tick alignment match the chip; the exact cycle on
+    # which a polled write lands after earlier output does not always.
+    BAUD_RESTART_OFFSET = 2
+    TX_MIN_WAIT = 2
+    UDRE_LEAD_CYCLES = 3
+
     def __init__(self) -> None:
         self.tx_log: list[int] = []
-        self._pending_tx: list[int] = []
+        self._shift_queue: list[int] = []  # byte being shifted out, then the one handed over
+        self._udr_byte: int | None = None  # byte waiting in UDR
+        self._tx_remaining = 0
+        self._baud_cycles = 0  # cycles since the baud-rate generator restarted
         self._rx_fifo: list[int] = []
+
+    @property
+    def _pending_tx(self) -> list[int]:
+        """Bytes still in the transmitter (shift register first)."""
+        return self._shift_queue + ([] if self._udr_byte is None else [self._udr_byte])
 
     def reset(self, data: bytearray) -> None:
         self.tx_log.clear()
-        self._pending_tx.clear()
+        self._shift_queue.clear()
+        self._udr_byte = None
+        self._tx_remaining = 0
+        self._baud_cycles = 0
         self._rx_fifo.clear()
         data[self.DATA_UCSRA] |= 1 << self.UDRE_BIT
+        data[self.DATA_UCSRC] = 0x06  # 8 data bits
+
+    def restart_baud_generator(self) -> None:
+        self._baud_cycles = self.BAUD_RESTART_OFFSET
+
+    def _tick_cycles(self, data: bytearray) -> int:
+        return (data[self.DATA_UBRRL] | ((data[self.DATA_UBRRH] & 0x0F) << 8)) + 1
+
+    def frame_cycles(self, data: bytearray) -> int:
+        """CPU cycles of one frame with the current UCSRnA/B/C and UBRR settings."""
+        ucsrc = data[self.DATA_UCSRC]
+        size = ((ucsrc >> 1) & 0x03) | (((data[self.DATA_UCSRB] >> 2) & 1) << 2)
+        data_bits = {0: 5, 1: 6, 2: 7, 3: 8, 7: 9}.get(size, 8)
+        bits = 1 + data_bits + (1 if (ucsrc >> 4) & 0x03 else 0) + (2 if (ucsrc >> 3) & 1 else 1)
+        ticks_per_bit = 8 if (data[self.DATA_UCSRA] >> 1) & 1 else 16
+        return bits * ticks_per_bit * self._tick_cycles(data)
 
     def write_udr(self, value: int, data: bytearray) -> None:
         data[self.DATA_UDR] = value & 0xFF
@@ -908,9 +655,17 @@ class UARTBase:
         if ((data[self.DATA_UCSRB] >> self.TXEN_BIT) & 1) == 0:
             return
 
-        data[self.DATA_UCSRA] &= ~(1 << self.UDRE_BIT)
-        data[self.DATA_UCSRA] &= ~(1 << self.TXC_BIT)
-        self._pending_tx.append(value & 0xFF)
+        if not self._shift_queue:
+            # Idle: straight into the shift register; the frame starts on the next tick.
+            tick = self._tick_cycles(data)
+            wait = (tick - self._baud_cycles % tick) % tick
+            if wait < self.TX_MIN_WAIT:
+                wait += tick
+            self._shift_queue.append(value & 0xFF)
+            self._tx_remaining = wait + self.frame_cycles(data)
+        else:
+            self._udr_byte = value & 0xFF
+            data[self.DATA_UCSRA] &= ~(1 << self.UDRE_BIT)
 
     def read_udr(self, data: bytearray) -> int:
         current = data[self.DATA_UDR]
@@ -938,25 +693,36 @@ class UARTBase:
         self._rx_fifo.append(value)
 
     def is_transmitting(self) -> bool:
-        """Return True while a byte is queued to be shifted out."""
-        return bool(self._pending_tx)
+        """Return True while a byte is being shifted out."""
+        return bool(self._shift_queue)
 
     def advance(self, cycles: int, data: bytearray) -> None:
         if cycles <= 0:
             return
-        if not self._pending_tx:
+        self._baud_cycles += cycles
+        if not self._shift_queue:
             return
 
-        # Minimal timing model: one queued byte completes on the next CPU step.
-        byte = self._pending_tx.pop(0)
-        self.tx_log.append(byte)
-        data[self.DATA_UCSRA] |= 1 << self.UDRE_BIT
-        data[self.DATA_UCSRA] |= 1 << self.TXC_BIT
+        self._tx_remaining -= cycles
+        if self._udr_byte is not None and self._tx_remaining <= self.UDRE_LEAD_CYCLES:
+            # The waiting byte follows without a gap.
+            self._shift_queue.append(self._udr_byte)
+            self._udr_byte = None
+            data[self.DATA_UCSRA] |= 1 << self.UDRE_BIT
+        while self._shift_queue and self._tx_remaining <= 0:
+            self.tx_log.append(self._shift_queue.pop(0))
+            if self._shift_queue:
+                self._tx_remaining += self.frame_cycles(data)
+            else:
+                data[self.DATA_UCSRA] |= 1 << self.TXC_BIT
 
 
 class UART0(UARTBase):
     DATA_UCSRA = DATA_UCSR0A = 0x00C0
     DATA_UCSRB = DATA_UCSR0B = 0x00C1
+    DATA_UCSRC = DATA_UCSR0C = 0x00C2
+    DATA_UBRRL = DATA_UBRR0L = 0x00C4
+    DATA_UBRRH = DATA_UBRR0H = 0x00C5
     DATA_UDR = DATA_UDR0 = 0x00C6
 
     UDRE_BIT = UDRE0_BIT = 5
@@ -972,6 +738,9 @@ class UART0(UARTBase):
 class UART1(UARTBase):
     DATA_UCSRA = DATA_UCSR1A = 0x00C8
     DATA_UCSRB = DATA_UCSR1B = 0x00C9
+    DATA_UCSRC = DATA_UCSR1C = 0x00CA
+    DATA_UBRRL = DATA_UBRR1L = 0x00CC
+    DATA_UBRRH = DATA_UBRR1H = 0x00CD
     DATA_UDR = DATA_UDR1 = 0x00CE
 
     UDRE_BIT = UDRE1_BIT = 5
@@ -987,6 +756,9 @@ class UART1(UARTBase):
 class UART2(UARTBase):
     DATA_UCSRA = DATA_UCSR2A = 0x00D0
     DATA_UCSRB = DATA_UCSR2B = 0x00D1
+    DATA_UCSRC = DATA_UCSR2C = 0x00D2
+    DATA_UBRRL = DATA_UBRR2L = 0x00D4
+    DATA_UBRRH = DATA_UBRR2H = 0x00D5
     DATA_UDR = DATA_UDR2 = 0x00D6
 
     UDRE_BIT = UDRE2_BIT = 5
@@ -1002,6 +774,9 @@ class UART2(UARTBase):
 class UART3(UARTBase):
     DATA_UCSRA = DATA_UCSR3A = 0x0130
     DATA_UCSRB = DATA_UCSR3B = 0x0131
+    DATA_UCSRC = DATA_UCSR3C = 0x0132
+    DATA_UBRRL = DATA_UBRR3L = 0x0134
+    DATA_UBRRH = DATA_UBRR3H = 0x0135
     DATA_UDR = DATA_UDR3 = 0x0136
 
     UDRE_BIT = UDRE3_BIT = 5

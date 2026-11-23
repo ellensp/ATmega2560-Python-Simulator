@@ -25,11 +25,11 @@ def _values(text: str) -> dict[str, str]:
 class TestHardwareComparison(unittest.TestCase):
     def test_simulator_matches_real_atmega2560(self) -> None:
         expected = _values((HWCHECK_DIR / "atmega2560_hardware.txt").read_text())
-        self.assertEqual(len(expected), 44)
+        self.assertEqual(len(expected), 125)
 
         emu = ATmega2560Emulator()
         emu.load_program_hex(str(HWCHECK_DIR / "hwcheck.hex"))
-        for _ in range(2_000_000):
+        for _ in range(6_000_000):
             emu.step()
             if emu.uart0.tx_log[-6:] == list(b"DONE\r\n"):
                 break

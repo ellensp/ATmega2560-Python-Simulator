@@ -103,6 +103,7 @@ class TestTimer2(unittest.TestCase):
             emu.step()
 
         self.assertEqual(emu.data[0x00B2], 0x00)
+        emu.step()  # TOV is set on the timer clock after BOTTOM is reached
         self.assertEqual(emu.data[0x20 + 0x17] & 0x01, 0x01)
 
     def test_async_mode_scales_timer2_tick_rate(self) -> None:

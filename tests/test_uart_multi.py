@@ -21,13 +21,14 @@ class TestAdditionalUARTs(unittest.TestCase):
                 program = [
                     ldi(16, 0x40 + index),
                     *sts(16, uart_cls.DATA_UDR),
+                    0xCFFF,  # rjmp .-2
                 ]
                 emu.load_program_words(program)
 
                 emu.step()
                 emu.step()
-
-                emu.step()  # one instruction later (hardware timing)
+                for _ in range(85):  # one frame: 160 cycles at UBRR = 0
+                    emu.step()
                 self.assertEqual(emu.get_uart(index).tx_log, [0x40 + index])
                 ucsra = emu.data[uart_cls.DATA_UCSRA]
                 self.assertEqual((ucsra >> uart_cls.UDRE_BIT) & 1, 1)
@@ -78,15 +79,18 @@ class TestAdditionalUARTs(unittest.TestCase):
                 program = [
                     ldi(16, 0x60 + index),
                     *sts(16, uart_cls.DATA_UDR),
+                    0xCFFF,  # rjmp .-2: wait here for the interrupt
                 ]
-                program.extend([0x0000] * 96)
+                program.extend([0x0000] * 400)
                 emu.load_program_words(program)
 
                 emu.step()
                 emu.step()
+                for _ in range(100):  # until the frame is out (160 cycles)
+                    emu.step()
+                    if emu.pc == getattr(emu, tx_vector_name):
+                        break
 
-                emu.step()  # one instruction later (hardware timing)
-                emu.step()  # one instruction later (hardware timing)
                 self.assertEqual(emu.pc, getattr(emu, tx_vector_name))
 
 

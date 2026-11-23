@@ -6,7 +6,7 @@ from sim import ATmega2560Emulator
 class TestGPIOAlternateFunctions(unittest.TestCase):
     def _new_emu(self) -> ATmega2560Emulator:
         emu = ATmega2560Emulator()
-        emu.load_program_words([0x0000] * 64)
+        emu.load_program_words([0x0000] * 256)
         return emu
 
     def test_usart0_tx_pin_reads_high_when_tx_enabled(self) -> None:
@@ -84,7 +84,7 @@ class TestGPIOAlternateFunctions(unittest.TestCase):
         emu._data_write(emu.DATA_SPDR, 0x55)
         self.assertEqual(emu._data_read(pin_addr) & (1 << 1), 1 << 1, "SCK active (~CPOL) during transfer")
 
-        for _ in range(34):  # one byte at f/4
+        for _ in range(33):  # one byte at f/4
             emu.step()
         self.assertEqual(emu._data_read(pin_addr) & (1 << 1), 0x00, "SCK returns to CPOL after transfer")
 
@@ -119,7 +119,8 @@ class TestGPIOAlternateFunctions(unittest.TestCase):
         emu._data_write(emu.uart0.DATA_UDR, 0x41)  # enqueue 'A'
         self.assertEqual(emu._data_read(pin_addr) & (1 << 1), 0, "TX low while byte is pending")
 
-        emu.step()  # advance() dequeues the byte
+        for _ in range(170):  # one frame: 160 cycles at UBRR = 0
+            emu.step()
         self.assertEqual(emu._data_read(pin_addr) & (1 << 1), 1 << 1, "TX idle-high after transmission")
 
     def test_twi_scl_driven_low_during_operation(self) -> None:
@@ -140,8 +141,8 @@ class TestGPIOAlternateFunctions(unittest.TestCase):
         )
         self.assertEqual(emu._data_read(pin_addr) & (1 << 0), 0x00, "SCL low during START operation")
 
-        # Let the operation complete (2 cycles).
-        for _ in range(2):
+        # Let the operation complete (one SCL period: 16 cycles at TWBR = 0).
+        for _ in range(16):
             emu.step()
         self.assertEqual(emu._data_read(pin_addr) & (1 << 0), 1 << 0, "SCL released after operation")
 
