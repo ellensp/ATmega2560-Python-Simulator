@@ -22,6 +22,23 @@ class TestInterrupts(unittest.TestCase):
         self.assertEqual(emu.data[0x21FE], 0x00)  # return PC middle byte
         self.assertEqual(emu.data[0x21FD], 0x00)  # return PC high byte
 
+    def test_interrupt_entry_cycles_reach_timers_and_total_cycles(self) -> None:
+        emu = ATmega2560Emulator()
+        emu.load_program_words([0x0000] * 64)
+
+        emu._set_flag(emu.FLAG_I, 1)
+        emu.data[0x20 + 0x25] = 0x01  # TCCR0B clk/1
+        emu.data[0x20 + 0x26] = 0xFF  # overflow on next tick
+        emu.data[0x006E] = 0x01       # TIMSK0 TOIE0
+        emu.data[0x0081] = 0x01       # TCCR1B clk/1: TCNT1 counts CPU cycles
+
+        emu.step()  # NOP (1 cycle) + interrupt entry (5 cycles)
+
+        self.assertEqual(emu.pc, emu.VECTOR_TIMER0_OVF)
+        self.assertEqual(emu.cycles, 6)
+        self.assertEqual(emu.total_cycles, 6)
+        self.assertEqual(emu.data[0x0084], 6)  # TCNT1L
+
     def test_timer0_overflow_interrupt_dispatch(self) -> None:
         emu = ATmega2560Emulator()
         # Ensure vector target exists in flash image.

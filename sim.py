@@ -1360,16 +1360,33 @@ class ATmega2560Emulator(
         else:
             raise NotImplementedError(f"Opcode 0x{opcode:04X} not implemented at PC={pc_before}")
 
-        self.timer0.advance(used_cycles, self.data)
-        self.timer1.advance(used_cycles, self.data)
-        self.timer2.advance(used_cycles, self.data)
-        self.timer3.advance(used_cycles, self.data)
-        self.timer4.advance(used_cycles, self.data)
-        self.timer5.advance(used_cycles, self.data)
-        self._advance_spi(used_cycles)
-        self._advance_adc(used_cycles)
-        self._advance_eeprom(used_cycles)
-        self._advance_twi(used_cycles)
+        if self._advance_time(used_cycles) == "reset":
+            self._perform_watchdog_reset()
+            return StepResult(pc_before, opcode, used_cycles, desc)
+        if self._interrupt_inhibit_once:
+            self._interrupt_inhibit_once = False
+        else:
+            entry_cycles = self._service_interrupts()
+            # Time passes for the peripherals during interrupt entry too.
+            if entry_cycles and self._advance_time(entry_cycles) == "reset":
+                self._perform_watchdog_reset()
+        return StepResult(pc_before, opcode, used_cycles, desc)
+
+    def _advance_time(self, cycles: int) -> Optional[str]:
+        """Advance every peripheral and the cycle counters by CPU cycles.
+
+        Returns the watchdog event for that span ("interrupt", "reset" or None).
+        """
+        self.timer0.advance(cycles, self.data)
+        self.timer1.advance(cycles, self.data)
+        self.timer2.advance(cycles, self.data)
+        self.timer3.advance(cycles, self.data)
+        self.timer4.advance(cycles, self.data)
+        self.timer5.advance(cycles, self.data)
+        self._advance_spi(cycles)
+        self._advance_adc(cycles)
+        self._advance_eeprom(cycles)
+        self._advance_twi(cycles)
         self._update_pcint_flags()
         uart_tx_before = (
             bool(self.uart0._pending_tx)
@@ -1378,7 +1395,7 @@ class ATmega2560Emulator(
             or bool(self.uart3._pending_tx)
         )
         for uart in self.uarts:
-            uart.advance(used_cycles, self.data)
+            uart.advance(cycles, self.data)
         uart_tx_after = (
             bool(self.uart0._pending_tx)
             or bool(self.uart1._pending_tx)
@@ -1387,17 +1404,10 @@ class ATmega2560Emulator(
         )
         if uart_tx_before != uart_tx_after:
             self._update_gpio_alt_overrides()
-        watchdog_event = self.watchdog.advance(used_cycles, self.data)
-        self.cycles += used_cycles
-        self.total_cycles += used_cycles
-        if watchdog_event == "reset":
-            self._perform_watchdog_reset()
-            return StepResult(pc_before, opcode, used_cycles, desc)
-        if self._interrupt_inhibit_once:
-            self._interrupt_inhibit_once = False
-        else:
-            self._service_interrupts()
-        return StepResult(pc_before, opcode, used_cycles, desc)
+        watchdog_event = self.watchdog.advance(cycles, self.data)
+        self.cycles += cycles
+        self.total_cycles += cycles
+        return watchdog_event
 
     def run(self, max_steps: Optional[int] = None) -> int:
         steps = 0

@@ -5,9 +5,14 @@ from sim_peripherals import Timer0, Timer1, Timer2, Timer3, Timer4, Timer5, Watc
 
 class _InterruptsMixin:
 
-    def _service_interrupts(self) -> None:
+    def _service_interrupts(self) -> int:
+        """Enter the highest-priority pending interrupt, if any.
+
+        Returns the CPU cycles the entry takes (0 when nothing was serviced). The
+        caller advances the cycle counters and the peripherals by that amount.
+        """
         if not self._get_flag(self.FLAG_I):
-            return
+            return 0
 
         eifr = self.data[0x20 + self.IO_EIFR]
         eimsk = self.data[0x20 + self.IO_EIMSK]
@@ -203,10 +208,10 @@ class _InterruptsMixin:
                 vector = self.VECTOR_TWI
 
         if vector is None:
-            return
+            return 0
 
         self._set_flag(self.FLAG_I, 0)
         self._push_return_address(self.pc)
         self.pc = vector
         # Interrupt response: 4 cycles, 5 with a 3-byte PC push (ATmega2560).
-        self.cycles += 4 + self.pc_extra_cycles
+        return 4 + self.pc_extra_cycles
