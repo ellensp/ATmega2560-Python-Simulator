@@ -84,6 +84,28 @@ class TestGPIOBehavior(unittest.TestCase):
         self.assertEqual(emu.data[port_addr], 0x00)
         self.assertEqual(emu._data_read(pin_addr), 0x00)
 
+    def test_sbi_on_pin_register_toggles_only_that_bit(self) -> None:
+        emu = ATmega2560Emulator()
+        emu.load_program_words([0x9A18])  # SBI PINB (0x03), 0
+        _, ddr_addr, port_addr = emu.GPIO_PORTS["B"]
+        emu.data[ddr_addr] = 0xFF
+        emu.data[port_addr] = 0b00000110  # PINB reads back 1s on bits 1 and 2
+
+        emu.step()
+
+        self.assertEqual(emu.data[port_addr], 0b00000111)
+
+    def test_cbi_on_pin_register_has_no_effect(self) -> None:
+        emu = ATmega2560Emulator()
+        emu.load_program_words([0x9818])  # CBI PINB (0x03), 0
+        _, ddr_addr, port_addr = emu.GPIO_PORTS["B"]
+        emu.data[ddr_addr] = 0xFF
+        emu.data[port_addr] = 0b00000111
+
+        emu.step()
+
+        self.assertEqual(emu.data[port_addr], 0b00000111)
+
 
 if __name__ == "__main__":
     unittest.main()

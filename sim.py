@@ -1057,8 +1057,8 @@ class ATmega2560Emulator(
         elif (opcode & 0xFF00) == 0x9800:
             a = (opcode >> 3) & 0x1F
             b = opcode & 0x7
-            v = self._io_read(a) & ~(1 << b)
-            self._io_write(a, v)
+            if (0x20 + a) not in self.GPIO_PIN_ADDRS:  # CBI on a PINx register has no effect
+                self._io_write(a, self._io_read(a) & ~(1 << b))
             used_cycles = 2
             desc = f"CBI 0x{a:02X}, {b}"
 
@@ -1066,8 +1066,10 @@ class ATmega2560Emulator(
         elif (opcode & 0xFF00) == 0x9A00:
             a = (opcode >> 3) & 0x1F
             b = opcode & 0x7
-            v = self._io_read(a) | (1 << b)
-            self._io_write(a, v)
+            if (0x20 + a) in self.GPIO_PIN_ADDRS:  # SBI on a PINx register toggles only that bit
+                self._io_write(a, 1 << b)
+            else:
+                self._io_write(a, self._io_read(a) | (1 << b))
             used_cycles = 2
             desc = f"SBI 0x{a:02X}, {b}"
 
