@@ -75,6 +75,7 @@ class TestADCController(unittest.TestCase):
             emu.step()
 
         self.assertEqual((emu.data[emu.DATA_ADCSRA] >> emu.ADC_ADIF_BIT) & 1, 1)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_ADC)
         self.assertEqual((emu.sreg >> emu.FLAG_I) & 1, 0)
 
@@ -324,6 +325,7 @@ class TestADCInterruptHighChannels(unittest.TestCase):
         emu = self._isr_convert(ch=8, value=0x1FF)
         result = emu.data[emu.DATA_ADCL] | (emu.data[emu.DATA_ADCH] << 8)
         self.assertEqual(result, 0x1FF)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_ADC)
         self.assertEqual((emu.sreg >> emu.FLAG_I) & 1, 0)   # I-flag cleared on entry
 
@@ -332,6 +334,7 @@ class TestADCInterruptHighChannels(unittest.TestCase):
         emu = self._isr_convert(ch=15, value=0x3FF)
         result = emu.data[emu.DATA_ADCL] | (emu.data[emu.DATA_ADCH] << 8)
         self.assertEqual(result, 0x3FF)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_ADC)
 
     def test_isr_dispatch_all_high_channels(self) -> None:
@@ -342,4 +345,5 @@ class TestADCInterruptHighChannels(unittest.TestCase):
                 emu = self._isr_convert(ch=ch, value=expected)
                 result = emu.data[emu.DATA_ADCL] | (emu.data[emu.DATA_ADCH] << 8)
                 self.assertEqual(result, expected)
+                emu.step()  # one instruction later (hardware timing)
                 self.assertEqual(emu.pc, emu.VECTOR_ADC)

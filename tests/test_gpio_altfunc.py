@@ -47,6 +47,7 @@ class TestGPIOAlternateFunctions(unittest.TestCase):
             emu.step()
 
         emu._data_write(emu.DATA_SPDR, 0x00)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu._data_read(pin_addr) & (1 << 2), 0x00)
 
     def test_twi_start_drives_sda_low_and_stop_releases_it(self) -> None:
@@ -83,7 +84,7 @@ class TestGPIOAlternateFunctions(unittest.TestCase):
         emu._data_write(emu.DATA_SPDR, 0x55)
         self.assertEqual(emu._data_read(pin_addr) & (1 << 1), 1 << 1, "SCK active (~CPOL) during transfer")
 
-        for _ in range(4):
+        for _ in range(34):  # one byte at f/4
             emu.step()
         self.assertEqual(emu._data_read(pin_addr) & (1 << 1), 0x00, "SCK returns to CPOL after transfer")
 
@@ -100,9 +101,10 @@ class TestGPIOAlternateFunctions(unittest.TestCase):
         # elapsed=0 → bit_idx=0 → bit 7 of 0x80 = 1.
         self.assertEqual(emu._data_read(pin_addr) & (1 << 2), 1 << 2, "MOSI=1 at start (bit 7)")
 
-        emu.step()
-        # elapsed=1 out of total=4 → bit_idx = min(7, 1*8//4) = 2 → bit 5 of 0x80 = 0.
-        self.assertEqual(emu._data_read(pin_addr) & (1 << 2), 0x00, "MOSI=0 mid-transfer (bit 5 of 0x80)")
+        for _ in range(5):
+            emu.step()
+        # elapsed=5 out of total=34 → bit_idx = 5*8//34 = 1 → bit 6 of 0x80 = 0.
+        self.assertEqual(emu._data_read(pin_addr) & (1 << 2), 0x00, "MOSI=0 mid-transfer (bit 6 of 0x80)")
 
     def test_uart_tx_pin_low_during_byte_transmission(self) -> None:
         """TX pin goes low (start-bit) while a byte is being shifted out, then returns high."""

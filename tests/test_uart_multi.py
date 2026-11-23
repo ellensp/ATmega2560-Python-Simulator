@@ -27,6 +27,7 @@ class TestAdditionalUARTs(unittest.TestCase):
                 emu.step()
                 emu.step()
 
+                emu.step()  # one instruction later (hardware timing)
                 self.assertEqual(emu.get_uart(index).tx_log, [0x40 + index])
                 ucsra = emu.data[uart_cls.DATA_UCSRA]
                 self.assertEqual((ucsra >> uart_cls.UDRE_BIT) & 1, 1)
@@ -84,6 +85,8 @@ class TestAdditionalUARTs(unittest.TestCase):
                 emu.step()
                 emu.step()
 
+                emu.step()  # one instruction later (hardware timing)
+                emu.step()  # one instruction later (hardware timing)
                 self.assertEqual(emu.pc, getattr(emu, tx_vector_name))
 
 

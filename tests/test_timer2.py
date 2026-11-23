@@ -56,6 +56,7 @@ class TestTimer2(unittest.TestCase):
         emu.step()  # 2
         emu.step()  # compare at 3 -> clear to 0 in CTC
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.data[0x00B2], 0x00)
         self.assertEqual((emu.data[0x20 + 0x17] >> 1) & 1, 1)  # OCF2A
         self.assertEqual(emu.data[0x20 + 0x17] & 1, 0)         # no overflow here
@@ -71,6 +72,7 @@ class TestTimer2(unittest.TestCase):
         emu.step()  # TCNT2=1
         emu.step()  # TCNT2=2 -> OCF2B
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual((emu.data[0x20 + 0x17] >> 2) & 1, 1)  # OCF2B
 
     def test_fast_pwm_wrap_sets_tov2(self) -> None:

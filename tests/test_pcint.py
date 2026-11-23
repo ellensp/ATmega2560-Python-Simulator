@@ -61,6 +61,7 @@ class TestPCINT(unittest.TestCase):
         emu.set_pin_level("B", 1, 1)
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_PCINT0)
 
     def test_pcint1_and_pcint2_interrupt_dispatch(self) -> None:
@@ -72,6 +73,7 @@ class TestPCINT(unittest.TestCase):
 
         emu.set_pin_level("J", 2, 1)
         emu.step()
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_PCINT1)
 
         # Return to mainline context and dispatch PCINT2 next.
@@ -80,6 +82,7 @@ class TestPCINT(unittest.TestCase):
         emu._set_flag(emu.FLAG_I, 1)
         emu.set_pin_level("K", 4, 1)
         emu.step()
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_PCINT2)
 
 

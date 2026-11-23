@@ -19,6 +19,7 @@ class TestUART0(unittest.TestCase):
         emu.step()
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.uart0.tx_log, [0x41])
         ucsr0a = emu.data[UART0.DATA_UCSR0A]
         self.assertEqual((ucsr0a >> UART0.UDRE0_BIT) & 1, 1)
@@ -92,6 +93,8 @@ class TestUART0(unittest.TestCase):
         emu.step()  # LDI
         emu.step()  # STS -> queues TX, completion happens at end of step
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_USART0_TX)
 
 

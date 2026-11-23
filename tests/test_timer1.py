@@ -33,6 +33,7 @@ class TestTimer1(unittest.TestCase):
         emu.step()  # TCNT1=1
         emu.step()  # TCNT1=2 -> OCF1A
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual((emu.data[0x20 + 0x16] >> 1) & 1, 1)
 
     def test_tifr1_write_one_clears_flag(self) -> None:
@@ -59,6 +60,7 @@ class TestTimer1(unittest.TestCase):
         emu.step()
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual((emu.data[0x20 + 0x16] >> 2) & 1, 1)
 
     def test_compare_c_sets_ocf1c(self) -> None:
@@ -74,6 +76,7 @@ class TestTimer1(unittest.TestCase):
         emu.step()
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual((emu.data[0x20 + 0x16] >> 3) & 1, 1)
 
     def test_trigger_timer1_capture_latches_icr_and_sets_icf1(self) -> None:

@@ -73,6 +73,7 @@ class TestTWIController(unittest.TestCase):
         emu.step()
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TWI)
         self.assertEqual((emu.sreg >> emu.FLAG_I) & 1, 0)
 

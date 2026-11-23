@@ -136,21 +136,24 @@ class Timer0:
                 _set_compare_flags_8bit(data, tifr_idx, next_val, ocr_a, ocr_b, self.OCF0A_BIT, self.OCF0B_BIT)
                 continue
 
-            raw_next = cur + 1
-            next_val = raw_next & 0xFF
-            data[tcnt_idx] = next_val
-            _set_compare_flags_8bit(data, tifr_idx, next_val, ocr_a, ocr_b, self.OCF0A_BIT, self.OCF0B_BIT)
+            # A compare flag is set on the timer clock after the match, so the
+            # counter stays at OCR0A for a full clock in CTC mode (period OCR0A + 1).
+            _set_compare_flags_8bit(data, tifr_idx, cur, ocr_a, ocr_b, self.OCF0A_BIT, self.OCF0B_BIT)
 
-            if ctc_mode and next_val == ocr_a:
+            if ctc_mode and cur == ocr_a:
                 data[tcnt_idx] = 0
                 continue
 
             if fast_pwm_mode:
-                if raw_next > top:
+                if cur >= top:
                     data[tcnt_idx] = 0
                     data[tifr_idx] |= 1 << self.TOV0_BIT
+                else:
+                    data[tcnt_idx] = cur + 1
                 continue
 
+            next_val = (cur + 1) & 0xFF
+            data[tcnt_idx] = next_val
             if next_val == 0:
                 data[tifr_idx] |= 1 << self.TOV0_BIT
 
@@ -251,20 +254,23 @@ class Timer1:
                 _set_compare_flags_16bit(data, tifr1_idx, nxt, ocr1a, ocr1b, ocr1c, self.OCF1A_BIT, self.OCF1B_BIT, self.OCF1C_BIT)
                 continue
 
-            nxt = (cur + 1) & 0xFFFF
-            _write16(data, self.DATA_TCNT1L, self.DATA_TCNT1H, nxt)
-            _set_compare_flags_16bit(data, tifr1_idx, nxt, ocr1a, ocr1b, ocr1c, self.OCF1A_BIT, self.OCF1B_BIT, self.OCF1C_BIT)
+            # Compare flags are set on the timer clock after the match (see Timer0).
+            _set_compare_flags_16bit(data, tifr1_idx, cur, ocr1a, ocr1b, ocr1c, self.OCF1A_BIT, self.OCF1B_BIT, self.OCF1C_BIT)
 
-            if ctc_mode and nxt == ocr1a:
+            if ctc_mode and cur == ocr1a:
                 _write16(data, self.DATA_TCNT1L, self.DATA_TCNT1H, 0)
                 continue
 
             if fast_pwm_top is not None:
-                if nxt > fast_pwm_top:
+                if cur >= fast_pwm_top:
                     _write16(data, self.DATA_TCNT1L, self.DATA_TCNT1H, 0)
                     data[tifr1_idx] |= 1 << self.TOV1_BIT
+                else:
+                    _write16(data, self.DATA_TCNT1L, self.DATA_TCNT1H, cur + 1)
                 continue
 
+            nxt = (cur + 1) & 0xFFFF
+            _write16(data, self.DATA_TCNT1L, self.DATA_TCNT1H, nxt)
             if nxt == 0:
                 data[tifr1_idx] |= 1 << self.TOV1_BIT
 
@@ -372,21 +378,23 @@ class Timer2:
                 _set_compare_flags_8bit(data, tifr2_idx, nxt, ocr_a, ocr_b, self.OCF2A_BIT, self.OCF2B_BIT)
                 continue
 
-            raw_next = cur + 1
-            nxt = raw_next & 0xFF
-            data[self.DATA_TCNT2] = nxt
-            _set_compare_flags_8bit(data, tifr2_idx, nxt, ocr_a, ocr_b, self.OCF2A_BIT, self.OCF2B_BIT)
+            # Compare flags are set on the timer clock after the match (see Timer0).
+            _set_compare_flags_8bit(data, tifr2_idx, cur, ocr_a, ocr_b, self.OCF2A_BIT, self.OCF2B_BIT)
 
-            if ctc_mode and nxt == ocr_a:
+            if ctc_mode and cur == ocr_a:
                 data[self.DATA_TCNT2] = 0
                 continue
 
             if fast_pwm_mode:
-                if raw_next > top:
+                if cur >= top:
                     data[self.DATA_TCNT2] = 0
                     data[tifr2_idx] |= 1 << self.TOV2_BIT
+                else:
+                    data[self.DATA_TCNT2] = cur + 1
                 continue
 
+            nxt = (cur + 1) & 0xFF
+            data[self.DATA_TCNT2] = nxt
             if nxt == 0:
                 data[tifr2_idx] |= 1 << self.TOV2_BIT
 
@@ -487,20 +495,23 @@ class Timer3:
                 _set_compare_flags_16bit(data, tifr3_idx, nxt, ocr3a, ocr3b, ocr3c, self.OCF3A_BIT, self.OCF3B_BIT, self.OCF3C_BIT)
                 continue
 
-            nxt = (cur + 1) & 0xFFFF
-            _write16(data, self.DATA_TCNT3L, self.DATA_TCNT3H, nxt)
-            _set_compare_flags_16bit(data, tifr3_idx, nxt, ocr3a, ocr3b, ocr3c, self.OCF3A_BIT, self.OCF3B_BIT, self.OCF3C_BIT)
+            # Compare flags are set on the timer clock after the match (see Timer0).
+            _set_compare_flags_16bit(data, tifr3_idx, cur, ocr3a, ocr3b, ocr3c, self.OCF3A_BIT, self.OCF3B_BIT, self.OCF3C_BIT)
 
-            if ctc_mode and nxt == ocr3a:
+            if ctc_mode and cur == ocr3a:
                 _write16(data, self.DATA_TCNT3L, self.DATA_TCNT3H, 0)
                 continue
 
             if fast_pwm_top is not None:
-                if nxt > fast_pwm_top:
+                if cur >= fast_pwm_top:
                     _write16(data, self.DATA_TCNT3L, self.DATA_TCNT3H, 0)
                     data[tifr3_idx] |= 1 << self.TOV3_BIT
+                else:
+                    _write16(data, self.DATA_TCNT3L, self.DATA_TCNT3H, cur + 1)
                 continue
 
+            nxt = (cur + 1) & 0xFFFF
+            _write16(data, self.DATA_TCNT3L, self.DATA_TCNT3H, nxt)
             if nxt == 0:
                 data[tifr3_idx] |= 1 << self.TOV3_BIT
 
@@ -593,20 +604,23 @@ class Timer4:
                 _set_compare_flags_16bit(data, tifr4_idx, nxt, ocr4a, ocr4b, ocr4c, self.OCF4A_BIT, self.OCF4B_BIT, self.OCF4C_BIT)
                 continue
 
-            nxt = (cur + 1) & 0xFFFF
-            _write16(data, self.DATA_TCNT4L, self.DATA_TCNT4H, nxt)
-            _set_compare_flags_16bit(data, tifr4_idx, nxt, ocr4a, ocr4b, ocr4c, self.OCF4A_BIT, self.OCF4B_BIT, self.OCF4C_BIT)
+            # Compare flags are set on the timer clock after the match (see Timer0).
+            _set_compare_flags_16bit(data, tifr4_idx, cur, ocr4a, ocr4b, ocr4c, self.OCF4A_BIT, self.OCF4B_BIT, self.OCF4C_BIT)
 
-            if ctc_mode and nxt == ocr4a:
+            if ctc_mode and cur == ocr4a:
                 _write16(data, self.DATA_TCNT4L, self.DATA_TCNT4H, 0)
                 continue
 
             if fast_pwm_top is not None:
-                if nxt > fast_pwm_top:
+                if cur >= fast_pwm_top:
                     _write16(data, self.DATA_TCNT4L, self.DATA_TCNT4H, 0)
                     data[tifr4_idx] |= 1 << self.TOV4_BIT
+                else:
+                    _write16(data, self.DATA_TCNT4L, self.DATA_TCNT4H, cur + 1)
                 continue
 
+            nxt = (cur + 1) & 0xFFFF
+            _write16(data, self.DATA_TCNT4L, self.DATA_TCNT4H, nxt)
             if nxt == 0:
                 data[tifr4_idx] |= 1 << self.TOV4_BIT
 
@@ -699,20 +713,23 @@ class Timer5:
                 _set_compare_flags_16bit(data, tifr5_idx, nxt, ocr5a, ocr5b, ocr5c, self.OCF5A_BIT, self.OCF5B_BIT, self.OCF5C_BIT)
                 continue
 
-            nxt = (cur + 1) & 0xFFFF
-            _write16(data, self.DATA_TCNT5L, self.DATA_TCNT5H, nxt)
-            _set_compare_flags_16bit(data, tifr5_idx, nxt, ocr5a, ocr5b, ocr5c, self.OCF5A_BIT, self.OCF5B_BIT, self.OCF5C_BIT)
+            # Compare flags are set on the timer clock after the match (see Timer0).
+            _set_compare_flags_16bit(data, tifr5_idx, cur, ocr5a, ocr5b, ocr5c, self.OCF5A_BIT, self.OCF5B_BIT, self.OCF5C_BIT)
 
-            if ctc_mode and nxt == ocr5a:
+            if ctc_mode and cur == ocr5a:
                 _write16(data, self.DATA_TCNT5L, self.DATA_TCNT5H, 0)
                 continue
 
             if fast_pwm_top is not None:
-                if nxt > fast_pwm_top:
+                if cur >= fast_pwm_top:
                     _write16(data, self.DATA_TCNT5L, self.DATA_TCNT5H, 0)
                     data[tifr5_idx] |= 1 << self.TOV5_BIT
+                else:
+                    _write16(data, self.DATA_TCNT5L, self.DATA_TCNT5H, cur + 1)
                 continue
 
+            nxt = (cur + 1) & 0xFFFF
+            _write16(data, self.DATA_TCNT5L, self.DATA_TCNT5H, nxt)
             if nxt == 0:
                 data[tifr5_idx] |= 1 << self.TOV5_BIT
 

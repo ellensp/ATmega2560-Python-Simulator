@@ -75,6 +75,7 @@ Run one specific test method:
 - `test_gpio.py`: GPIO read/write baseline behavior, pull-ups, toggle semantics, and external-drive release handling.
 - `test_gpio_altfunc.py`: Alternate-function pin ownership and waveform-level pin behavior (UART TX, SPI SCK/MOSI, TWI SDA/SCL).
 - `test_hex_loader.py`: Intel HEX loading and image mapping behavior.
+- `test_hwcheck.py`: runs `examples/hwcheck/hwcheck.hex` and compares all 44 values with the output of a real ATmega2560.
 - `test_int0.py`: Focused `INT0` behavior tests.
 - `test_interrupts.py`: Generic ISR dispatch/priority and interrupt control flow tests.
 - `test_isr_firmware.py`: ISR-driven firmware integration-style patterns.

@@ -20,11 +20,21 @@ class _MemoryMixin:
     # Data-space read / write
     # -----------------------------
 
-    def _data_read(self, addr: int) -> int:
+    def _data_read(self, addr: int, pre: int = 1) -> int:
+        """Read data space. `pre` is how many cycles into the current instruction
+        an I/O register is sampled: the start of the last cycle (1 for the
+        2-cycle LD/LDD/LDS, 0 for IN)."""
         addr &= 0xFFFF
         if not self._is_valid_data_addr(addr):
             return 0
         self._profile_record_ram_read(addr)
+
+        if addr >= self.DATA_SRAM_START:
+            return self.data[addr]
+        if addr < 0x20:
+            return self.reg[addr]
+        if self._step_pre is not None:
+            self._step_sync(pre)
 
         pin_level = self._read_port_by_pin_addr(addr)
         if pin_level is not None:
@@ -35,6 +45,20 @@ class _MemoryMixin:
 
         if addr == self.DATA_SPH:
             return (self.sp >> 8) & 0xFF
+
+        if addr == self.DATA_SREG:
+            return self.sreg & 0xFF
+
+        if 0x84 <= addr <= 0x12D:
+            # 16-bit timer registers share a TEMP high byte per timer: reading
+            # TCNTnL/ICRnL latches the high byte, which TCNTnH/ICRnH then return.
+            latch = self._t16_low_read.get(addr)
+            if latch is not None:
+                self._t16_temp[latch[0]] = self.data[latch[1]]
+                return self.data[addr]
+            timer = self._t16_high_read.get(addr)
+            if timer is not None:
+                return self._t16_temp[timer]
 
         if addr == self.DATA_SPDR:
             value = self.data[addr]
@@ -52,13 +76,42 @@ class _MemoryMixin:
     def _read_pin_io_level(self, io_addr: int) -> int | None:
         return self._read_port_by_pin_addr(0x20 + io_addr)
 
-    def _data_write(self, addr: int, value: int) -> None:
+    def _data_write(self, addr: int, value: int, pre: int = 2) -> None:
+        """Write data space. An I/O register write takes effect at the end of the
+        instruction: `pre` is the instruction's length in cycles (2 for
+        ST/STD/STS/SBI/CBI, 1 for OUT)."""
         addr &= 0xFFFF
         value &= 0xFF
 
         if not self._is_valid_data_addr(addr):
             return
         self._profile_record_ram_write(addr)
+
+        if addr >= self.DATA_SRAM_START:
+            self.data[addr] = value
+            return
+        if addr < 0x20:
+            self.reg[addr] = value
+            return
+        if self._step_pre is not None:
+            self._step_sync_write(pre)
+
+        if addr == self.DATA_SREG:
+            self.sreg = value
+            return
+
+        if 0x84 <= addr <= 0x12D:
+            # 16-bit timer registers: the high byte goes to the timer's TEMP
+            # register and reaches the register when the low byte is written.
+            timer = self._t16_high_write.get(addr)
+            if timer is not None:
+                self._t16_temp[timer] = value
+                return
+            latch = self._t16_low_write.get(addr)
+            if latch is not None:
+                self.data[latch[1]] = self._t16_temp[latch[0]]
+                self.data[addr] = value
+                return
 
         if addr == (0x20 + Timer0.IO_TIFR0):
             self.data[addr] = self.data[addr] & (~value & 0xFF)
@@ -193,6 +246,8 @@ class _MemoryMixin:
             txc_mask = 1 << uart.TXC_BIT
             if value & txc_mask:
                 self.data[addr] &= ~txc_mask
+            # U2Xn and MPCMn are the only other writable bits.
+            self.data[addr] = (self.data[addr] & ~0x03) | (value & 0x03)
             self._update_gpio_alt_overrides()
             return
 
@@ -275,7 +330,7 @@ class _MemoryMixin:
     # I/O space read / write
     # -----------------------------
 
-    def _io_read(self, io_addr: int) -> int:
+    def _io_read(self, io_addr: int, pre: int = 0) -> int:
         io_addr &= 0x3F
         if io_addr == 0x3F:
             return self.sreg & 0xFF
@@ -284,11 +339,7 @@ class _MemoryMixin:
         if io_addr == 0x3E:
             return (self.sp >> 8) & 0xFF
 
-        pin_level = self._read_pin_io_level(io_addr)
-        if pin_level is not None:
-            return pin_level
-
-        return self._data_read(0x20 + io_addr)
+        return self._data_read(0x20 + io_addr, pre)
 
     def _build_io_name_map(self) -> dict[int, str]:
         io_map: dict[int, str] = {}
@@ -323,7 +374,7 @@ class _MemoryMixin:
             return name
         return f"0x{io_addr:02X}"
 
-    def _io_write(self, io_addr: int, value: int) -> None:
+    def _io_write(self, io_addr: int, value: int, pre: int = 1) -> None:
         io_addr &= 0x3F
         value &= 0xFF
         if io_addr == 0x3F:
@@ -335,7 +386,7 @@ class _MemoryMixin:
         if io_addr == 0x3E:
             self.sp = (self.sp & 0x00FF) | (value << 8)
             return
-        self._data_write(0x20 + io_addr, value)
+        self._data_write(0x20 + io_addr, value, pre)
 
     # -----------------------------
     # Program loading

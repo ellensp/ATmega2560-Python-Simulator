@@ -119,6 +119,7 @@ class _EmulatorConstants:
     DATA_EIND = 0x005C
     DATA_SPL = 0x005D
     DATA_SPH = 0x005E
+    DATA_SREG = 0x005F
     DATA_EECR = 0x003F
     DATA_EEDR = 0x0040
     DATA_EEARL = 0x0041

@@ -53,17 +53,18 @@ class TestATmega1280(unittest.TestCase):
         emu.data[0x20 + 0x26] = 0xFF  # overflow on next tick
         emu.data[0x006E] = 0x01       # TIMSK0 TOIE0
 
-        emu.step()
+        emu.step()  # NOP: TOV0 set
+        emu.step()  # NOP, then the interrupt is entered
 
         self.assertEqual(emu.pc, emu.VECTOR_TIMER0_OVF)
         self.assertEqual(emu.sp, 0x21FD)
-        self.assertEqual(emu.data[0x21FF], 0x01)
+        self.assertEqual(emu.data[0x21FF], 0x02)
         self.assertEqual(emu.data[0x21FE], 0x00)
-        self.assertEqual(emu.cycles, 5)  # 1 cycle NOP + 4 cycle interrupt latency
+        self.assertEqual(emu.cycles, 6)  # 2 NOPs + 4 cycle interrupt entry
 
 
 class TestCallReturnCycles(unittest.TestCase):
-    """CALL/RCALL/ICALL/RET/RETI take one more cycle with a 22-bit PC (ATmega2560)."""
+    """CALL/RCALL/ICALL/RET/RETI take one more cycle with a 22-bit PC (ATmega2560); interrupt entry doesn't."""
 
     def cycles(self, cls, program: list[int], steps: int = 1, z: int = 0, sp: int | None = None) -> int:
         emu = cls()
@@ -97,8 +98,9 @@ class TestCallReturnCycles(unittest.TestCase):
     def test_reti(self) -> None:
         self.check([0x9518], 4, 5, sp=0x0200)
 
-    def test_interrupt_latency(self) -> None:
-        for cls, latency in ((ATmega1280Emulator, 4), (ATmega2560Emulator, 5)):
+    def test_interrupt_entry(self) -> None:
+        # Interrupt entry takes 4 cycles on both (measured on a real ATmega2560).
+        for cls in (ATmega1280Emulator, ATmega2560Emulator):
             emu = cls()
             emu.load_program_words([0x0000] * 64)
             emu._set_flag(emu.FLAG_I, 1)
@@ -106,7 +108,8 @@ class TestCallReturnCycles(unittest.TestCase):
             emu.data[0x20 + 0x26] = 0xFF  # overflow on next tick
             emu.data[0x006E] = 0x01       # TIMSK0 TOIE0
             emu.step()
-            self.assertEqual(emu.cycles, 1 + latency, cls.__name__)
+            emu.step()
+            self.assertEqual(emu.cycles, 2 + 4, cls.__name__)
 
 
 if __name__ == "__main__":

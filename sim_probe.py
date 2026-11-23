@@ -5,9 +5,8 @@ happened on, like a logic analyzer connected to those pins. It hooks the
 emulator's data-space writes, so OUT, STS, ST, SBI and CBI to a watched port's
 PORTx, DDRx or PINx register are all seen.
 
-Timestamps are the cycle count at the start of the instruction that changed
-the pin, so they are exact to within the length of that instruction (1-2
-cycles for the port instructions, 62.5-125 ns at 16 MHz).
+Timestamps are the cycle on which the write takes effect: the end of the
+instruction that changed the pin, as on the real chip.
 
 ShiftRegisterDecoder turns three probed pins (serial data, shift clock, latch)
 into the parallel outputs of a 74HC595-style shift register.
@@ -111,8 +110,8 @@ class PinProbe:
             counts[e.pin] = counts.get(e.pin, 0) + 1
         return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
 
-    def _data_write_hook(self, addr: int, value: int) -> None:
-        self._orig_data_write(addr, value)
+    def _data_write_hook(self, addr: int, value: int, *args) -> None:
+        self._orig_data_write(addr, value, *args)
         port = self._addr_to_port.get(addr & 0xFFFF)
         if port is None:
             return

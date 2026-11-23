@@ -13,12 +13,14 @@ class TestInterrupts(unittest.TestCase):
         emu.data[0x20 + 0x26] = 0xFF  # overflow on next tick
         emu.data[0x006E] = 0x01       # TIMSK0 TOIE0
 
-        emu.step()
+        emu.step()  # NOP: TOV0 is set at the end of this cycle, too late to be taken here
+        self.assertEqual(emu.pc, 1)
 
+        emu.step()  # NOP, then the interrupt is entered
         self.assertEqual(emu.pc, emu.VECTOR_TIMER0_OVF)
-        self.assertEqual(emu.cycles, 6)  # 1 cycle NOP + 5 cycle interrupt latency (3-byte PC push)
+        self.assertEqual(emu.cycles, 6)  # 2 NOPs + 4 cycle interrupt entry
         self.assertEqual(emu.sp, 0x21FC)
-        self.assertEqual(emu.data[0x21FF], 0x01)  # return PC low byte
+        self.assertEqual(emu.data[0x21FF], 0x02)  # return PC low byte
         self.assertEqual(emu.data[0x21FE], 0x00)  # return PC middle byte
         self.assertEqual(emu.data[0x21FD], 0x00)  # return PC high byte
 
@@ -32,7 +34,8 @@ class TestInterrupts(unittest.TestCase):
         emu.data[0x006E] = 0x01       # TIMSK0 TOIE0
         emu.data[0x0081] = 0x01       # TCCR1B clk/1: TCNT1 counts CPU cycles
 
-        emu.step()  # NOP (1 cycle) + interrupt entry (5 cycles)
+        emu.step()  # NOP: TOV0 set
+        emu.step()  # NOP + interrupt entry (4 cycles)
 
         self.assertEqual(emu.pc, emu.VECTOR_TIMER0_OVF)
         self.assertEqual(emu.cycles, 6)
@@ -53,6 +56,7 @@ class TestInterrupts(unittest.TestCase):
         self.assertEqual(emu.pc, 1)
 
         emu.step()  # TCNT0 -> 0x00 => TOV0 pending => service interrupt
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER0_OVF)
         self.assertEqual((emu.sreg >> emu.FLAG_I) & 1, 0)
         self.assertEqual(emu.sp, 0x21FC)
@@ -69,6 +73,7 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER0_COMPA)
         tifr0 = emu.data[0x20 + 0x15]
         self.assertEqual((tifr0 >> 1) & 1, 0)  # OCF0A cleared by service
@@ -86,6 +91,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()  # TCNT0 -> 1 => OCF0B => service interrupt
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER0_COMPB)
         self.assertEqual((emu.sreg >> emu.FLAG_I) & 1, 0)
         self.assertEqual(emu.sp, 0x21FC)
@@ -103,6 +110,7 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER0_COMPA)
         tifr0 = emu.data[0x20 + 0x15]
         self.assertEqual((tifr0 >> 1) & 1, 0)  # OCF0A cleared by service
@@ -111,7 +119,7 @@ class TestInterrupts(unittest.TestCase):
 
     def test_reti_restores_pc_and_sets_i(self) -> None:
         emu = ATmega2560Emulator()
-        # Vector has RETI, main line has NOP at return address.
+        # Vector has RETI, main line has NOPs.
         program = [0x0000] * 64
         program[emu.VECTOR_TIMER0_OVF] = 0x9518  # RETI
         emu.load_program_words(program)
@@ -121,12 +129,13 @@ class TestInterrupts(unittest.TestCase):
         emu.data[0x20 + 0x26] = 0xFF  # overflow on next tick
         emu.data[0x006E] = 0x01       # TIMSK0 TOIE0
 
-        emu.step()  # Executes NOP at PC=0, then services overflow interrupt.
+        emu.step()  # NOP at PC=0: TOV0 set
+        emu.step()  # NOP at PC=1, then the overflow interrupt is entered
         self.assertEqual(emu.pc, emu.VECTOR_TIMER0_OVF)
         self.assertEqual((emu.sreg >> emu.FLAG_I) & 1, 0)
 
         emu.step()  # RETI
-        self.assertEqual(emu.pc, 1)  # resume after interrupted instruction
+        self.assertEqual(emu.pc, 2)  # resume after the last instruction that ran
         self.assertEqual((emu.sreg >> emu.FLAG_I) & 1, 1)
 
     def test_pending_interrupt_does_not_nest_without_sei(self) -> None:
@@ -135,16 +144,16 @@ class TestInterrupts(unittest.TestCase):
 
         emu._set_flag(emu.FLAG_I, 1)
         emu.data[0x006E] = 0x02  # TIMSK0 OCIE0A
-        emu.data[0x006F] = 0x01  # TIMSK1 TOIE1
+        emu.data[0x0071] = 0x01  # TIMSK3 TOIE3
         emu.data[0x20 + 0x15] |= 1 << 1  # OCF0A
-        emu.data[0x20 + 0x16] |= 1 << 0  # TOV1
+        emu.data[0x20 + 0x18] |= 1 << 0  # TOV3
 
         emu.step()  # service Timer0 COMPA first
         self.assertEqual(emu.pc, emu.VECTOR_TIMER0_COMPA)
 
-        emu.step()  # execute ISR NOP with I=0, should not nest into Timer1
+        emu.step()  # execute ISR NOP with I=0, should not nest into Timer3
         self.assertEqual(emu.pc, emu.VECTOR_TIMER0_COMPA + 1)
-        self.assertEqual((emu.data[0x20 + 0x16] >> 0) & 1, 1)  # TOV1 still pending
+        self.assertEqual((emu.data[0x20 + 0x18] >> 0) & 1, 1)  # TOV3 still pending
 
     def test_interrupt_can_nest_after_sei_inside_isr(self) -> None:
         emu = ATmega2560Emulator()
@@ -154,9 +163,9 @@ class TestInterrupts(unittest.TestCase):
 
         emu._set_flag(emu.FLAG_I, 1)
         emu.data[0x006E] = 0x02  # TIMSK0 OCIE0A
-        emu.data[0x006F] = 0x01  # TIMSK1 TOIE1
+        emu.data[0x0071] = 0x01  # TIMSK3 TOIE3
         emu.data[0x20 + 0x15] |= 1 << 1  # OCF0A
-        emu.data[0x20 + 0x16] |= 1 << 0  # TOV1
+        emu.data[0x20 + 0x18] |= 1 << 0  # TOV3
 
         emu.step()  # Timer0 COMPA
         self.assertEqual(emu.pc, emu.VECTOR_TIMER0_COMPA)
@@ -167,35 +176,39 @@ class TestInterrupts(unittest.TestCase):
         self.assertEqual(emu.sp, 0x21FC)
         self.assertEqual((emu.sreg >> emu.FLAG_I) & 1, 1)
 
-        emu.step()  # Next ISR instruction runs, then Timer1 OVF nests.
-        self.assertEqual(emu.pc, emu.VECTOR_TIMER1_OVF)
+        emu.step()  # Next ISR instruction runs, then Timer3 OVF nests.
+        self.assertEqual(emu.pc, emu.VECTOR_TIMER3_OVF)
         self.assertEqual(emu.sp, 0x21F9)
         self.assertEqual((emu.sreg >> emu.FLAG_I) & 1, 0)
 
-    def test_back_to_back_reti_dispatch_preserves_stack_integrity(self) -> None:
+    def test_reti_runs_one_main_instruction_before_the_next_interrupt(self) -> None:
         emu = ATmega2560Emulator()
         program = [0x0000] * 128
         program[emu.VECTOR_TIMER0_COMPA] = 0x9518  # RETI
-        program[emu.VECTOR_TIMER1_OVF] = 0x9518    # RETI
+        program[emu.VECTOR_TIMER3_OVF] = 0x9518    # RETI
         emu.load_program_words(program)
 
         emu._set_flag(emu.FLAG_I, 1)
         emu.data[0x006E] = 0x02  # TIMSK0 OCIE0A
-        emu.data[0x006F] = 0x01  # TIMSK1 TOIE1
+        emu.data[0x0071] = 0x01  # TIMSK3 TOIE3
         emu.data[0x20 + 0x15] |= 1 << 1  # OCF0A
-        emu.data[0x20 + 0x16] |= 1 << 0  # TOV1
+        emu.data[0x20 + 0x18] |= 1 << 0  # TOV3
 
-        emu.step()  # Timer0 COMPA service
+        emu.step()  # NOP, then Timer0 COMPA is entered
         self.assertEqual(emu.sp, 0x21FC)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER0_COMPA)
 
-        emu.step()  # RETI from Timer0, then Timer1 OVF immediately services
-        self.assertEqual(emu.sp, 0x21FC)
-        self.assertEqual(emu.pc, emu.VECTOR_TIMER1_OVF)
-
-        emu.step()  # RETI from Timer1
+        emu.step()  # RETI from Timer0: back in the main program
         self.assertEqual(emu.sp, 0x21FF)
         self.assertEqual(emu.pc, 1)
+
+        emu.step()  # one main instruction runs, then Timer3 OVF is entered
+        self.assertEqual(emu.sp, 0x21FC)
+        self.assertEqual(emu.pc, emu.VECTOR_TIMER3_OVF)
+
+        emu.step()  # RETI from Timer3
+        self.assertEqual(emu.sp, 0x21FF)
+        self.assertEqual(emu.pc, 2)
 
     def test_timer1_overflow_interrupt_dispatch(self) -> None:
         emu = ATmega2560Emulator()
@@ -209,6 +222,7 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()  # overflow -> service
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER1_OVF)
         self.assertEqual((emu.sreg >> emu.FLAG_I) & 1, 0)
         self.assertEqual(emu.sp, 0x21FC)
@@ -227,6 +241,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()  # compare match -> service
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER1_COMPA)
         self.assertEqual((emu.sreg >> emu.FLAG_I) & 1, 0)
 
@@ -244,6 +260,7 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER1_COMPA)
         tifr1 = emu.data[0x20 + 0x16]
         self.assertEqual((tifr1 >> 1) & 1, 0)  # OCF1A cleared by service
@@ -263,6 +280,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER1_COMPB)
 
     def test_timer1_compc_interrupt_dispatch(self) -> None:
@@ -279,6 +298,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER1_COMPC)
 
     def test_timer1_capt_interrupt_dispatch(self) -> None:
@@ -333,6 +354,7 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()  # overflow -> service
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER2_OVF)
         self.assertEqual((emu.sreg >> emu.FLAG_I) & 1, 0)
 
@@ -348,6 +370,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()  # compare match -> service
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER2_COMPA)
 
     def test_timer2_compb_interrupt_dispatch(self) -> None:
@@ -362,6 +386,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER2_COMPB)
 
     def test_timer2_compa_compb_ovf_priority(self) -> None:
@@ -377,6 +403,7 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER2_COMPA)
         tifr2 = emu.data[0x20 + 0x17]
         self.assertEqual((tifr2 >> 1) & 1, 0)  # OCF2A cleared by service
@@ -395,6 +422,7 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER3_OVF)
 
     def test_timer3_compa_interrupt_dispatch(self) -> None:
@@ -411,6 +439,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER3_COMPA)
 
     def test_timer3_compb_interrupt_dispatch(self) -> None:
@@ -427,6 +457,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER3_COMPB)
 
     def test_timer3_compc_interrupt_dispatch(self) -> None:
@@ -443,6 +475,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER3_COMPC)
 
     def test_timer3_capt_interrupt_dispatch(self) -> None:
@@ -498,6 +532,7 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER4_OVF)
 
     def test_timer4_compa_interrupt_dispatch(self) -> None:
@@ -514,6 +549,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER4_COMPA)
 
     def test_timer4_compb_interrupt_dispatch(self) -> None:
@@ -530,6 +567,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER4_COMPB)
 
     def test_timer4_compc_interrupt_dispatch(self) -> None:
@@ -546,6 +585,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER4_COMPC)
 
     def test_timer4_capt_interrupt_dispatch(self) -> None:
@@ -601,6 +642,7 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER5_OVF)
 
     def test_timer5_compa_interrupt_dispatch(self) -> None:
@@ -617,6 +659,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER5_COMPA)
 
     def test_timer5_compb_interrupt_dispatch(self) -> None:
@@ -633,6 +677,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER5_COMPB)
 
     def test_timer5_compc_interrupt_dispatch(self) -> None:
@@ -649,6 +695,8 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_TIMER5_COMPC)
 
     def test_timer5_capt_interrupt_dispatch(self) -> None:
@@ -692,7 +740,8 @@ class TestInterrupts(unittest.TestCase):
         self.assertEqual((tifr5 >> 3) & 1, 1)
         self.assertEqual(tifr5 & 1, 1)
 
-    def test_cross_timer_priority_timer0_compa_beats_all_other_timer_compa(self) -> None:
+    def test_cross_timer_priority_follows_vector_order(self) -> None:
+        # Vector order: Timer2, Timer1, Timer0, Timer3, Timer4, Timer5.
         emu = ATmega2560Emulator()
         emu.load_program_words([0x0000] * 320)
 
@@ -716,28 +765,28 @@ class TestInterrupts(unittest.TestCase):
 
         emu.step()
 
-        self.assertEqual(emu.pc, emu.VECTOR_TIMER0_COMPA)
-        self.assertEqual((emu.data[0x20 + 0x15] >> 1) & 1, 0)
+        self.assertEqual(emu.pc, emu.VECTOR_TIMER2_COMPA)
+        self.assertEqual((emu.data[0x20 + 0x15] >> 1) & 1, 1)
         self.assertEqual((emu.data[0x20 + 0x16] >> 1) & 1, 1)
-        self.assertEqual((emu.data[0x20 + 0x17] >> 1) & 1, 1)
+        self.assertEqual((emu.data[0x20 + 0x17] >> 1) & 1, 0)
         self.assertEqual((emu.data[0x20 + 0x18] >> 1) & 1, 1)
         self.assertEqual((emu.data[0x20 + 0x19] >> 1) & 1, 1)
         self.assertEqual((emu.data[0x20 + 0x1A] >> 1) & 1, 1)
 
-    def test_cross_timer_priority_timer1_beats_timer2_to_timer5(self) -> None:
+    def test_cross_timer_priority_timer1_beats_timer0_and_timer3_to_timer5(self) -> None:
         emu = ATmega2560Emulator()
         emu.load_program_words([0x0000] * 320)
 
         emu._set_flag(emu.FLAG_I, 1)
 
+        emu.data[0x006E] = 0x02
         emu.data[0x006F] = 0x02
-        emu.data[0x0070] = 0x02
         emu.data[0x0071] = 0x02
         emu.data[0x0072] = 0x02
         emu.data[0x0073] = 0x02
 
+        emu.data[0x20 + 0x15] |= 1 << 1
         emu.data[0x20 + 0x16] |= 1 << 1
-        emu.data[0x20 + 0x17] |= 1 << 1
         emu.data[0x20 + 0x18] |= 1 << 1
         emu.data[0x20 + 0x19] |= 1 << 1
         emu.data[0x20 + 0x1A] |= 1 << 1
@@ -745,8 +794,8 @@ class TestInterrupts(unittest.TestCase):
         emu.step()
 
         self.assertEqual(emu.pc, emu.VECTOR_TIMER1_COMPA)
+        self.assertEqual((emu.data[0x20 + 0x15] >> 1) & 1, 1)
         self.assertEqual((emu.data[0x20 + 0x16] >> 1) & 1, 0)
-        self.assertEqual((emu.data[0x20 + 0x17] >> 1) & 1, 1)
         self.assertEqual((emu.data[0x20 + 0x18] >> 1) & 1, 1)
         self.assertEqual((emu.data[0x20 + 0x19] >> 1) & 1, 1)
         self.assertEqual((emu.data[0x20 + 0x1A] >> 1) & 1, 1)

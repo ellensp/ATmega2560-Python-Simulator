@@ -99,6 +99,7 @@ class TestEEPROMController(unittest.TestCase):
         self.assertEqual(emu.pc, 1)
 
         emu.step()
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual(emu.pc, emu.VECTOR_EEPROM_READY)
         self.assertEqual((emu.sreg >> emu.FLAG_I) & 1, 0)
 

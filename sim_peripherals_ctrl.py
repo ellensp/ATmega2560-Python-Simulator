@@ -172,7 +172,10 @@ class _PeripheralsCtrlMixin:
         div = {0: 4, 1: 16, 2: 64, 3: 128}[spr]
         if spi2x:
             div = max(1, div // 2)
-        return div
+        # Eight SCK periods of `div` CPU cycles plus start-up and flag
+        # synchronisation. Measured on a real ATmega2560 at f/4: SPIF reads as set
+        # 33 to 38 cycles after the SPDR write.
+        return 8 * div + 2
 
     def _start_spi_transfer(self, value: int) -> None:
         self._spi_transfer_value = value & 0xFF

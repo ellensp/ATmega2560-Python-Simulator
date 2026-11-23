@@ -53,9 +53,34 @@ class ATmega2560Emulator(
         self.cycles: int = 0
         self.total_cycles: int = 0
         # A 22-bit PC (more than 64K words of flash) pushes and pops a 3-byte return
-        # address, which costs one more cycle for CALL/RCALL/ICALL, RET/RETI and
-        # interrupt entry than on 16-bit PC devices.
+        # address, which costs one more cycle for CALL/RCALL/ICALL and RET/RETI
+        # than on 16-bit PC devices.
         self.pc_extra_cycles: int = 1 if self.PC_WORD_MASK > 0xFFFF else 0
+        # Position inside the instruction being executed (None outside step()).
+        self._step_pre: Optional[int] = None
+        self._step_irq_sampled = False
+        self._step_irq_candidate = False
+        self._step_i_before = 0
+        self._step_wdt_event: Optional[str] = None
+        # I/O registers where SBI/CBI act on the named bit only: writing PINx
+        # toggles, and the interrupt flag registers are write-one-to-clear.
+        self._bit_write_addrs = set(self.GPIO_PIN_ADDRS) | set(range(0x35, 0x3D))  # TIFR0-5, PCIFR, EIFR
+        # 16-bit timer TEMP high-byte register, one per timer.
+        self._t16_temp: dict[int, int] = {}
+        self._t16_high_write: dict[int, int] = {}
+        self._t16_low_write: dict[int, tuple[int, int]] = {}
+        self._t16_low_read: dict[int, tuple[int, int]] = {}
+        self._t16_high_read: dict[int, int] = {}
+        for n, timer_cls in ((1, Timer1), (3, Timer3), (4, Timer4), (5, Timer5)):
+            self._t16_temp[n] = 0
+            for stem in (f"TCNT{n}", f"ICR{n}", f"OCR{n}A", f"OCR{n}B", f"OCR{n}C"):
+                lo = getattr(timer_cls, f"DATA_{stem}L")
+                hi = getattr(timer_cls, f"DATA_{stem}H")
+                self._t16_high_write[hi] = n
+                self._t16_low_write[lo] = (n, hi)
+                if not stem.startswith("OCR"):
+                    self._t16_low_read[lo] = (n, hi)
+                    self._t16_high_read[hi] = n
         self.reset_count: int = 0
         self.watchdog_reset_count: int = 0
 
@@ -122,7 +147,6 @@ class ATmega2560Emulator(
         self._gpio_output_override_masks: dict[int, int] = {pin_addr: 0 for pin_addr, _, _ in self.GPIO_PORTS.values()}
         self._gpio_alt_signature: tuple[int, ...] | None = None
         self._pcint_dirty = True
-        self._interrupt_inhibit_once = False
         self._io_name_map = self._build_io_name_map()
         self._reset_runtime_state(watchdog_reset=False, count_reset=False)
 
@@ -162,7 +186,8 @@ class ATmega2560Emulator(
             2: self._pcint_group_level(2),
         }
         self._pcint_dirty = True
-        self._interrupt_inhibit_once = False
+        for n in self._t16_temp:
+            self._t16_temp[n] = 0
         self._adc_conversion_cycles_remaining = 0
         self._adc_conversion_channel = 0
         self._adc_interrupt_pending = False
@@ -287,6 +312,12 @@ class ATmega2560Emulator(
         opcode = self.fetch()
         desc = "UNIMPLEMENTED"
         used_cycles = 1
+        self._step_pre = 0
+        self._step_irq_sampled = False
+        self._step_irq_candidate = False
+        self._step_wdt_event = None
+        # Setting I (SEI, RETI, OUT SREG) allows interrupts one instruction later.
+        self._step_i_before = self.sreg & 0x80
 
         # NOP: 0000 0000 0000 0000
         if opcode == 0x0000:
@@ -627,11 +658,12 @@ class ATmega2560Emulator(
             r = opcode & 0x07
             rd = 16 + d
             rr = 16 + r
-            result = ((self.reg[rd] * self.reg[rr]) << 1) & 0xFFFF
+            product = self.reg[rd] * self.reg[rr]
+            result = (product << 1) & 0xFFFF
             self.reg[0] = result & 0xFF
             self.reg[1] = (result >> 8) & 0xFF
             self._set_flag(self.FLAG_Z, int(result == 0))
-            self._set_flag(self.FLAG_C, (result >> 15) & 1)
+            self._set_flag(self.FLAG_C, (product >> 15) & 1)  # bit 15 before the shift
             used_cycles = 2
             desc = f"FMUL r{rd}, r{rr}"
 
@@ -643,11 +675,12 @@ class ATmega2560Emulator(
             rr = 16 + r
             rd_s = self.reg[rd] if self.reg[rd] < 0x80 else self.reg[rd] - 0x100
             rr_s = self.reg[rr] if self.reg[rr] < 0x80 else self.reg[rr] - 0x100
-            result = ((rd_s * rr_s) << 1) & 0xFFFF
+            product = rd_s * rr_s
+            result = (product << 1) & 0xFFFF
             self.reg[0] = result & 0xFF
             self.reg[1] = (result >> 8) & 0xFF
             self._set_flag(self.FLAG_Z, int(result == 0))
-            self._set_flag(self.FLAG_C, (result >> 15) & 1)
+            self._set_flag(self.FLAG_C, (product >> 15) & 1)
             used_cycles = 2
             desc = f"FMULS r{rd}, r{rr}"
 
@@ -658,11 +691,12 @@ class ATmega2560Emulator(
             rd = 16 + d
             rr = 16 + r
             rd_s = self.reg[rd] if self.reg[rd] < 0x80 else self.reg[rd] - 0x100
-            result = ((rd_s * self.reg[rr]) << 1) & 0xFFFF
+            product = rd_s * self.reg[rr]
+            result = (product << 1) & 0xFFFF
             self.reg[0] = result & 0xFF
             self.reg[1] = (result >> 8) & 0xFF
             self._set_flag(self.FLAG_Z, int(result == 0))
-            self._set_flag(self.FLAG_C, (result >> 15) & 1)
+            self._set_flag(self.FLAG_C, (product >> 15) & 1)
             used_cycles = 2
             desc = f"FMULSU r{rd}, r{rr}"
 
@@ -1061,8 +1095,9 @@ class ATmega2560Emulator(
         elif (opcode & 0xFF00) == 0x9800:
             a = (opcode >> 3) & 0x1F
             b = opcode & 0x7
-            if (0x20 + a) not in self.GPIO_PIN_ADDRS:  # CBI on a PINx register has no effect
-                self._io_write(a, self._io_read(a) & ~(1 << b))
+            # CBI writes a 0 to one bit: no effect on PINx or a write-one-to-clear flag.
+            if (0x20 + a) not in self._bit_write_addrs:
+                self._io_write(a, self._io_read(a, 1) & ~(1 << b), 2)
             used_cycles = 2
             desc = f"CBI 0x{a:02X}, {b}"
 
@@ -1070,10 +1105,11 @@ class ATmega2560Emulator(
         elif (opcode & 0xFF00) == 0x9A00:
             a = (opcode >> 3) & 0x1F
             b = opcode & 0x7
-            if (0x20 + a) in self.GPIO_PIN_ADDRS:  # SBI on a PINx register toggles only that bit
-                self._io_write(a, 1 << b)
+            # SBI writes a 1 to one bit: toggles that PINx bit or clears that flag only.
+            if (0x20 + a) in self._bit_write_addrs:
+                self._io_write(a, 1 << b, 2)
             else:
-                self._io_write(a, self._io_read(a) | (1 << b))
+                self._io_write(a, self._io_read(a, 1) | (1 << b), 2)
             used_cycles = 2
             desc = f"SBI 0x{a:02X}, {b}"
 
@@ -1275,8 +1311,6 @@ class ATmega2560Emulator(
             desc = "CLT"
         elif opcode == 0x9478:
             self._set_flag(self.FLAG_I, 1)
-            # AVR accepts interrupts after the instruction following SEI.
-            self._interrupt_inhibit_once = True
             desc = "SEI"
         elif opcode == 0x94F8:
             self._set_flag(self.FLAG_I, 0)
@@ -1358,19 +1392,46 @@ class ATmega2560Emulator(
             desc = f"{mnemonic} {k:+d}"
 
         else:
+            self._step_pre = None
             raise NotImplementedError(f"Opcode 0x{opcode:04X} not implemented at PC={pc_before}")
 
-        if self._advance_time(used_cycles) == "reset":
+        # An interrupt is taken at the end of this instruction only if it was
+        # already pending one cycle before that.
+        if not self._step_irq_sampled:
+            self._step_sync(used_cycles - 1)
+            self._sample_interrupts()
+        self._step_sync(used_cycles)
+        self._step_pre = None
+        if self._step_wdt_event == "reset":
             self._perform_watchdog_reset()
             return StepResult(pc_before, opcode, used_cycles, desc)
-        if self._interrupt_inhibit_once:
-            self._interrupt_inhibit_once = False
-        else:
+        if self._step_irq_candidate:
             entry_cycles = self._service_interrupts()
             # Time passes for the peripherals during interrupt entry too.
             if entry_cycles and self._advance_time(entry_cycles) == "reset":
                 self._perform_watchdog_reset()
         return StepResult(pc_before, opcode, used_cycles, desc)
+
+    def _step_sync(self, offset: int) -> None:
+        """Advance time to `offset` cycles into the instruction being executed."""
+        delta = offset - self._step_pre
+        if delta > 0:
+            event = self._advance_time(delta)
+            if event == "reset" or (event and self._step_wdt_event is None):
+                self._step_wdt_event = event
+            self._step_pre = offset
+
+    def _step_sync_write(self, offset: int) -> None:
+        """Advance to the end of the instruction (`offset` cycles) before an I/O
+        register write, sampling the interrupts one cycle earlier."""
+        if not self._step_irq_sampled:
+            self._step_sync(offset - 1)
+            self._sample_interrupts()
+        self._step_sync(offset)
+
+    def _sample_interrupts(self) -> None:
+        self._step_irq_sampled = True
+        self._step_irq_candidate = bool(self._step_i_before) and self._find_pending_interrupt() is not None
 
     def _advance_time(self, cycles: int) -> Optional[str]:
         """Advance every peripheral and the cycle counters by CPU cycles.

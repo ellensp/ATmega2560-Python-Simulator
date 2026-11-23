@@ -15,7 +15,7 @@ class TestSPIController(unittest.TestCase):
         emu._data_write(emu.DATA_SPCR, (1 << emu.SPCR_SPE_BIT) | (1 << emu.SPCR_MSTR_BIT))
         emu._data_write(emu.DATA_SPDR, 0x3C)
 
-        for _ in range(4):
+        for _ in range(34):  # one byte at f/4
             emu.step()
 
         self.assertEqual(emu.spi_transmitted_bytes, [0x3C])
@@ -28,7 +28,7 @@ class TestSPIController(unittest.TestCase):
         emu._data_write(emu.DATA_SPCR, (1 << emu.SPCR_SPE_BIT) | (1 << emu.SPCR_MSTR_BIT))
         emu._data_write(emu.DATA_SPDR, 0x11)
 
-        for _ in range(4):
+        for _ in range(34):  # one byte at f/4
             emu.step()
 
         self.assertEqual(emu._data_read(emu.DATA_SPDR), 0x55)
@@ -53,7 +53,7 @@ class TestSPIController(unittest.TestCase):
         )
         emu._data_write(emu.DATA_SPDR, 0x20)
 
-        for _ in range(4):
+        for _ in range(35):  # one byte at f/4, then one instruction before the interrupt
             emu.step()
 
         self.assertEqual(emu.pc, emu.VECTOR_SPI_STC)

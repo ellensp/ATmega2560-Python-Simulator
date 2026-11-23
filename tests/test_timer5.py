@@ -33,6 +33,7 @@ class TestTimer5(unittest.TestCase):
         emu.step()
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual((emu.data[0x20 + 0x1A] >> 1) & 1, 1)
 
     def test_tifr5_write_one_clears_flag(self) -> None:
@@ -58,6 +59,7 @@ class TestTimer5(unittest.TestCase):
         emu.step()
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual((emu.data[0x20 + 0x1A] >> 2) & 1, 1)
 
     def test_compare_c_sets_ocf5c(self) -> None:
@@ -73,6 +75,7 @@ class TestTimer5(unittest.TestCase):
         emu.step()
         emu.step()
 
+        emu.step()  # one instruction later (hardware timing)
         self.assertEqual((emu.data[0x20 + 0x1A] >> 3) & 1, 1)
 
     def test_trigger_timer5_capture_latches_icr_and_sets_icf5(self) -> None:
