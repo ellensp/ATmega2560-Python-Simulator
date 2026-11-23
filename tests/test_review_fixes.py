@@ -202,6 +202,144 @@ class TestTimer1Modes(unittest.TestCase):
         self.assertEqual(emu.data[0x0084], 12)          # second ramp up
 
 
+class TestOCRBuffering(unittest.TestCase):
+    def _start(self, tccr1a: int, tccr1b_mode: int, top: int) -> ATmega2560Emulator:
+        emu = ATmega2560Emulator()
+        emu.load_program_words([0x0000] * 400)
+        emu._data_write(0x008B, 0)                      # OCR1B = 80, written in normal mode
+        emu._data_write(0x008A, 80)
+        emu._data_write(0x0080, tccr1a)
+        emu._data_write(0x0081, tccr1b_mode)
+        emu._data_write(0x0087, 0)                      # ICR1 = top
+        emu._data_write(0x0086, top)
+        emu._data_write(0x0081, tccr1b_mode | 0x01)
+        for _ in range(6):
+            emu.step()
+        emu._data_write(0x008B, 0)                      # OCR1B = 20 while running
+        emu._data_write(0x008A, 20)
+        return emu
+
+    def _ocf1b(self, emu: ATmega2560Emulator) -> int:
+        return (emu.data[0x20 + 0x16] >> 2) & 1
+
+    def test_normal_mode_write_takes_effect_at_once(self) -> None:
+        emu = self._start(0x00, 0x00, 200)
+        for _ in range(40):
+            emu.step()
+        self.assertEqual(self._ocf1b(emu), 1)           # matched the new value, 20
+
+    def test_fast_pwm_loads_the_buffer_at_bottom(self) -> None:
+        emu = self._start(0x02, 0x18, 200)              # mode 14, TOP = ICR1
+        self.assertEqual(emu._data_read(0x008A), 20)    # the CPU reads the buffer
+        for _ in range(40):
+            emu.step()
+        self.assertEqual(self._ocf1b(emu), 0)           # 20 not in use yet
+        for _ in range(40):
+            emu.step()
+        self.assertEqual(self._ocf1b(emu), 1)           # the old value, 80, still matched
+        emu.data[0x20 + 0x16] = 0
+        for _ in range(140):                            # past TOP, into the next period
+            emu.step()
+        self.assertEqual(self._ocf1b(emu), 1)           # now 20 matched
+
+    def test_phase_correct_loads_the_buffer_at_top(self) -> None:
+        emu = self._start(0x02, 0x10, 100)              # mode 10, TOP = ICR1
+        for _ in range(86):                             # up to 92: the old value, 80, matched
+            emu.step()
+        self.assertEqual(self._ocf1b(emu), 1)
+        emu.data[0x20 + 0x16] = 0
+        for _ in range(48):                             # over TOP and down to 60
+            emu.step()
+        self.assertEqual(self._ocf1b(emu), 0)           # 80 no longer in use on the way down
+
+    def test_phase_and_frequency_correct_loads_the_buffer_at_bottom(self) -> None:
+        emu = self._start(0x00, 0x10, 100)              # mode 8, TOP = ICR1
+        for _ in range(86):
+            emu.step()
+        emu.data[0x20 + 0x16] = 0
+        for _ in range(48):
+            emu.step()
+        self.assertEqual(self._ocf1b(emu), 1)           # 80 still in use on the way down
+
+
+class TestTimerExternalClock(unittest.TestCase):
+    def test_timer1_counts_edges_of_t1(self) -> None:
+        emu = ATmega2560Emulator()
+        emu.load_program_words([0x0000] * 16)
+        emu.data[0x0081] = 0x07                         # clock on the rising edge of T1 (PD6)
+        for _ in range(3):
+            emu.set_pin_level("D", 6, 1)
+            emu.step()
+            emu.set_pin_level("D", 6, 0)
+            emu.step()
+        self.assertEqual(emu.data[0x0084], 3)
+
+        emu.data[0x0081] = 0x06                         # falling edge
+        emu.set_pin_level("D", 6, 1)
+        self.assertEqual(emu.data[0x0084], 3)
+        emu.set_pin_level("D", 6, 0)
+        self.assertEqual(emu.data[0x0084], 4)
+
+    def test_timer0_counts_edges_of_t0_and_not_cpu_cycles(self) -> None:
+        emu = ATmega2560Emulator()
+        emu.load_program_words([0x0000] * 16)
+        emu.data[0x20 + 0x25] = 0x07                    # rising edge of T0 (PD7)
+        for _ in range(8):
+            emu.step()
+        self.assertEqual(emu.data[0x20 + 0x26], 0)
+        emu.set_pin_level("D", 7, 1)
+        self.assertEqual(emu.data[0x20 + 0x26], 1)
+
+
+class TestADCAutoTrigger(unittest.TestCase):
+    def test_timer0_overflow_starts_a_conversion(self) -> None:
+        emu = ATmega2560Emulator()
+        emu.load_program_words([0x0000] * 400)
+        emu.set_adc_channel_value(0, 0x123)
+        emu._data_write(emu.DATA_ADCSRB, 0x04)          # trigger source: Timer0 overflow
+        emu._data_write(emu.DATA_ADCSRA, (1 << emu.ADC_ADEN_BIT) | (1 << emu.ADC_ADATE_BIT))
+        for _ in range(60):
+            emu.step()
+        self.assertEqual((emu.data[emu.DATA_ADCSRA] >> emu.ADC_ADSC_BIT) & 1, 0)   # nothing started
+
+        emu.data[0x20 + 0x26] = 0xF0
+        emu.data[0x20 + 0x25] = 0x01                    # Timer0 runs and overflows in 16 cycles
+        for _ in range(20):
+            emu.step()
+        self.assertEqual((emu.data[emu.DATA_ADCSRA] >> emu.ADC_ADSC_BIT) & 1, 1)
+        for _ in range(60):
+            emu.step()
+        self.assertEqual(emu.data[emu.DATA_ADCL] | (emu.data[emu.DATA_ADCH] << 8), 0x123)
+
+
+class TestErasedEEPROM(unittest.TestCase):
+    def test_eeprom_starts_erased(self) -> None:
+        emu = ATmega2560Emulator()
+        self.assertEqual(set(emu.eeprom), {0xFF})
+
+
+class TestDeepSleepWake(unittest.TestCase):
+    def test_power_down_wake_waits_for_the_oscillator(self) -> None:
+        emu = ATmega2560Emulator()
+        program = [0x0000] * 0x90
+        program[0] = 0xC07F                             # rjmp to 0x80, past the vector table
+        program[emu.VECTOR_INT0] = RETI
+        program[0x80:0x83] = [SEI, SLEEP, RJMP_SELF]
+        emu.load_program_words(program)
+        emu.data[emu.DATA_SMCR] = 0x05                  # SE, power-down
+        emu._data_write(emu.DATA_EICRA, 0x03)           # INT0 rising edge
+        emu._data_write(0x20 + emu.IO_EIMSK, 0x01)
+        for _ in range(3):                              # RJMP, SEI, SLEEP
+            emu.step()
+        for _ in range(10):
+            emu.step()
+        before = emu.cycles
+        emu.set_pin_level("D", 0, 1)
+        emu.step()
+        self.assertEqual(emu.pc, emu.VECTOR_INT0)
+        self.assertGreaterEqual(emu.cycles - before, emu.SLEEP_WAKE_OSC_STARTUP_CYCLES)
+
+
 class TestSharedPrescaler(unittest.TestCase):
     def test_prescaler_phase_is_shared_and_pauses_with_all_timers_stopped(self) -> None:
         emu = ATmega2560Emulator()

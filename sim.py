@@ -68,7 +68,7 @@ class ATmega2560Emulator(
         self.program: List[int] = []
         self.halted: bool = False
         self.halt_reason: Optional[str] = None
-        self.eeprom: bytearray = bytearray(self.EEPROM_SIZE)
+        self.eeprom: bytearray = bytearray(b"\xFF" * self.EEPROM_SIZE)  # erased
         self.profile_ram_reads: list[int] = []
         self.profile_ram_writes: list[int] = []
         self.profile_flash_reads: list[int] = []
@@ -97,6 +97,10 @@ class ATmega2560Emulator(
         # toggles, and the interrupt flag registers are write-one-to-clear.
         self._bit_write_addrs = set(self.GPIO_PIN_ADDRS) | set(range(0x35, 0x3D))  # TIFR0-5, PCIFR, EIFR
         self._timers16 = {1: self.timer1, 3: self.timer3, 4: self.timer4, 5: self.timer5}
+        self._timer_by_tccr = {0x44: self.timer0, 0x45: self.timer0, 0xB0: self.timer2, 0xB1: self.timer2}
+        for timer in self._timers16.values():
+            self._timer_by_tccr[timer._tccra] = timer
+            self._timer_by_tccr[timer._tccrb] = timer
         self._uart_by_ubrrl = {uart.DATA_UBRRL: uart for uart in self.uarts}
         # 16-bit timer TEMP high-byte register, one per timer.
         self._t16_temp: dict[int, int] = {}
@@ -117,6 +121,7 @@ class ATmega2560Emulator(
         self._ext_int_levels: List[int] = [0] * 8
         self._ext_level_mask = 0  # INTn in low-level mode with the pin low
         self._extint_dirty = True
+        self._timer_pin_levels: dict[int, int] = {n: 0 for n in self.TIMER_CLOCK_PINS}
         # Free-running prescaler shared by Timer0, 1, 3, 4 and 5.
         self._prescaler = 0
         self._prescaler_hold = False
@@ -124,6 +129,8 @@ class ATmega2560Emulator(
         self._step_halt_cycles = 0
         self._adc_first_conversion = True
         self._adc_locked = False
+        self._adc_clock_cycles = 0
+        self._adc_trigger_last = 0
         # TWI slave addresses that acknowledge; None means every address does.
         self.twi_devices: Optional[set] = None
         self._eeprom_write_cycles_remaining = 0
@@ -245,6 +252,7 @@ class ATmega2560Emulator(
         self._update_gpio_alt_overrides()
         self._ext_int_levels = [0] * 8
         self._ext_level_mask = 0
+        self._timer_pin_levels = {n: 0 for n in self.TIMER_CLOCK_PINS}
         self._extint_dirty = True
         self._update_ext_int_flags()
         self._prescaler = 0
@@ -253,6 +261,8 @@ class ATmega2560Emulator(
         self._step_halt_cycles = 0
         self._adc_first_conversion = True
         self._adc_locked = False
+        self._adc_clock_cycles = 0
+        self._adc_trigger_last = 0
         self._reset_profile_counters()
 
     # -----------------------------
@@ -1427,7 +1437,13 @@ class ATmega2560Emulator(
             self._perform_watchdog_reset()
         elif self._get_flag(self.FLAG_I) and self._find_pending_interrupt() is not None:
             self._sleeping = False
-            if self._advance_time(self.SLEEP_WAKE_CYCLES) == "reset":
+            # Power-down and power-save restart the oscillator; the standby modes keep it running.
+            startup = {2: self.SLEEP_WAKE_OSC_STARTUP_CYCLES, 3: self.SLEEP_WAKE_OSC_STARTUP_CYCLES, 6: self.SLEEP_WAKE_STANDBY_CYCLES, 7: self.SLEEP_WAKE_STANDBY_CYCLES}.get(mode, 0)
+            if startup:
+                event = self.watchdog.advance(startup, self.data)
+                self.cycles += startup
+                self.total_cycles += startup
+            if event == "reset" or self._advance_time(self.SLEEP_WAKE_CYCLES) == "reset":
                 self._perform_watchdog_reset()
             else:
                 entry_cycles = self._service_interrupts()

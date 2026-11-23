@@ -1,10 +1,10 @@
 # hwcheck: simulator against a real ATmega2560
 
-`hwcheck.hex` runs 125 small checks of instruction timing, interrupt behaviour, timers, sleep, EEPROM, SPI, USART and register access, and prints one `name=value` line (hex) per check on USART0 at 115200 baud. The same image runs on a real chip and in the simulator, so the two outputs can be compared line by line.
+`hwcheck.hex` runs 162 small checks of instruction timing, interrupt behaviour, timers, sleep, EEPROM, SPI, USART, ADC, TWI and register access, and prints one `name=value` line (hex) per check on USART0 at 115200 baud. The same image runs on a real chip and in the simulator, so the two outputs can be compared line by line.
 
 `atmega2560_hardware.txt` is the output of an Arduino Mega 2560 R3 (16 MHz). `tests/test_hwcheck.py` runs the image in the simulator and requires every value to match it.
 
-The firmware drives no pins as outputs except USART0 TX. It briefly enables pull-ups on PA0-PA2 and PB0, so leave those unconnected. Each run writes one EEPROM cell (the last one, 0x0FFF).
+The firmware drives no pins as outputs except USART0 TX, and SDA/SCL (PD1/PD0) as a TWI master against the board's own pull-ups. It briefly enables pull-ups on PA0-PA2 and PB0. Leave all of those unconnected. Each run writes one EEPROM cell (the last one, 0x0FFF).
 
 Build:
 
@@ -51,4 +51,8 @@ What the checks cover:
 | `presc_*`, `prescb_*`, `prescd_*`, `presce_*`, `pf`, `ph`, `pi`, `gtccr` | phase of clk/8 ticks after a prescaler reset, a start, a stop/restart and with all timers stopped |
 | `spi_f2` ... `spi_f64` | first cycle (plus one) after the SPDR write at which SPIF reads as set |
 | `uart_udre_*` | cycles from a UDR0 write on an idle transmitter to the data-register-empty interrupt |
+| `ob<mode>_1/2/3`, `ob0n/f/p` | TIFR after OCR1B / OCR0B is rewritten while the timer runs in that mode (OCR double buffering) |
+| `tb4`, `tb15`, `tb11`, `tb9` | TCNT1L after OCR1A, used as TOP, is rewritten while running |
+| `adc1`, `adc2`, `adc_free` | cycles from the ADSC write to the ADC interrupt for 20 start phases (first and second conversion), and between free-running results |
+| `twi72_*`, `twi12_*` | cycles and TWSR for a START and for SLA+W with no device on the bus, at two bit rates |
 | `eere`, `eepe`, `eeread_val` | cycles of the EEPROM read and write strobes; the value read back |

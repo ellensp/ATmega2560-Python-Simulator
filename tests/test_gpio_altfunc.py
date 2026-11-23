@@ -141,8 +141,8 @@ class TestGPIOAlternateFunctions(unittest.TestCase):
         )
         self.assertEqual(emu._data_read(pin_addr) & (1 << 0), 0x00, "SCL low during START operation")
 
-        # Let the operation complete (one SCL period: 16 cycles at TWBR = 0).
-        for _ in range(16):
+        # Let the operation complete (one SCL period of 16 cycles at TWBR = 0, plus 6).
+        for _ in range(22):
             emu.step()
         self.assertEqual(emu._data_read(pin_addr) & (1 << 0), 1 << 0, "SCL released after operation")
 

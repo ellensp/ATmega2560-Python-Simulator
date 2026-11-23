@@ -118,6 +118,12 @@ class _MemoryMixin:
             self.data[addr] = (value & 0x83) if tsm else 0
             return
 
+        timer = self._timer_by_tccr.get(addr)
+        if timer is not None:
+            self.data[addr] = value
+            timer.mode_written(self.data)
+            return
+
         if addr == 0x46:
             self.timer0._compare_block = True
         elif addr == 0xB2:

@@ -22,7 +22,7 @@ class TestEEPROMController(unittest.TestCase):
         for _ in range(52800 // 2 - 1):  # 2 cycles per step
             emu.step()
         self.assertEqual((emu.data[emu.DATA_EECR] >> emu.EECR_EEPE_BIT) & 1, 1)
-        self.assertEqual(emu.eeprom[0x0010], 0x00)
+        self.assertEqual(emu.eeprom[0x0010], 0xFF)  # still erased
         emu.step()
         self.assertEqual((emu.data[emu.DATA_EECR] >> emu.EECR_EEPE_BIT) & 1, 0)
         self.assertEqual(emu.eeprom[0x0010], 0x5A)
@@ -114,7 +114,7 @@ class TestEEPROMController(unittest.TestCase):
         for _ in range(3):
             emu.step()
 
-        self.assertEqual(emu.eeprom[0x0033], 0x00)
+        self.assertEqual(emu.eeprom[0x0033], 0xFF)  # still erased
         self.assertEqual((emu.data[emu.DATA_EECR] >> emu.EECR_EEPE_BIT) & 1, 0)
 
     def test_eeprom_contents_persist_across_reset(self) -> None:

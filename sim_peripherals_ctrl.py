@@ -24,12 +24,18 @@ class _PeripheralsCtrlMixin:
         mux5 = (self.data[self.DATA_ADCSRB] >> 3) & 1
         return (mux5 << 3) | (mux & 0x07)
 
-    def _adc_conversion_cycles(self) -> int:
+    def _adc_clock_divisor(self) -> int:
         prescaler = self.data[self.DATA_ADCSRA] & self.ADC_ADPS_MASK
-        scale = 2 if prescaler == 0 else 1 << prescaler  # ADPS 0 and 1 both select /2
-        # 13 ADC clocks, 25 for the first conversion after the ADC is enabled.
+        return 2 if prescaler == 0 else 1 << prescaler  # ADPS 0 and 1 both select /2
+
+    def _adc_conversion_cycles(self) -> int:
+        """Cycles from the ADSC write to ADIF. The ADC prescaler runs freely from the
+        moment ADEN is set; a conversion starts on its next edge and takes 13 ADC
+        clocks, 25 for the first one after enabling (measured on a real ATmega2560)."""
+        scale = self._adc_clock_divisor()
         clocks = 25 if self._adc_first_conversion else self.ADC_BASE_CONVERSION_CYCLES
-        return clocks * scale
+        wait = scale - (self._adc_clock_cycles % scale)
+        return wait + clocks * scale + 1
 
     def _start_adc_conversion(self) -> None:
         self._adc_conversion_channel = self._adc_selected_channel()
@@ -55,6 +61,7 @@ class _PeripheralsCtrlMixin:
         )
         if ((value >> self.ADC_ADEN_BIT) & 1) and not ((cur >> self.ADC_ADEN_BIT) & 1):
             self._adc_first_conversion = True
+            self._adc_clock_cycles = self.ADC_ENABLE_PHASE
         cur = (cur & ~control_mask) | (value & control_mask)
         self.data[self.DATA_ADCSRA] = cur & 0xFF
 
@@ -87,15 +94,47 @@ class _PeripheralsCtrlMixin:
         adcsra = self.data[self.DATA_ADCSRA]
         if ((adcsra >> self.ADC_ADATE_BIT) & 1) and ((adcsra >> self.ADC_ADEN_BIT) & 1) and (self.data[self.DATA_ADCSRB] & 0x07) == 0:
             self._start_adc_conversion()
+            # Back to back: exactly 13 ADC clocks from one result to the next.
+            self._adc_conversion_cycles_remaining = self.ADC_BASE_CONVERSION_CYCLES * self._adc_clock_divisor()
+
+    # Flag that starts a conversion on its rising edge, by ADTS2:0 (1..7).
+    def _adc_trigger_level(self, source: int) -> int:
+        data = self.data
+        if source == 1:
+            return self._analog_comp_output
+        if source == 2:
+            return data[0x20 + self.IO_EIFR] & 0x01
+        if source == 3:
+            return (data[0x35] >> 1) & 1   # OCF0A
+        if source == 4:
+            return data[0x35] & 1          # TOV0
+        if source == 5:
+            return (data[0x36] >> 2) & 1   # OCF1B
+        if source == 6:
+            return data[0x36] & 1          # TOV1
+        return (data[0x36] >> 5) & 1       # ICF1
 
     def _advance_adc(self, cycles: int) -> None:
         if cycles <= 0:
             return
+        adcsra = self.data[self.DATA_ADCSRA]
+        if (adcsra >> self.ADC_ADEN_BIT) & 1:
+            self._adc_clock_cycles += cycles
+            source = self.data[self.DATA_ADCSRB] & 0x07
+            if source and ((adcsra >> self.ADC_ADATE_BIT) & 1):
+                level = self._adc_trigger_level(source)
+                if level and not self._adc_trigger_last and self._adc_conversion_cycles_remaining == 0:
+                    self._start_adc_conversion()
+                self._adc_trigger_last = level
         if self._adc_conversion_cycles_remaining <= 0:
             return
-        self._adc_conversion_cycles_remaining = max(0, self._adc_conversion_cycles_remaining - cycles)
+        overshoot = cycles - self._adc_conversion_cycles_remaining
+        self._adc_conversion_cycles_remaining = max(0, -overshoot)
         if self._adc_conversion_cycles_remaining == 0:
             self._adc_commit_result()
+            if self._adc_conversion_cycles_remaining > 0:
+                # A free-running conversion started on time, not at the end of this step.
+                self._adc_conversion_cycles_remaining = max(1, self._adc_conversion_cycles_remaining - overshoot)
 
     # -----------------------------
     # Analog comparator
@@ -260,8 +299,11 @@ class _PeripheralsCtrlMixin:
         return 16 + 2 * self.data[self.DATA_TWBR] * prescale
 
     def _twi_operation_cycles(self, kind: str = "data") -> int:
-        # One SCL period for a START condition, nine for a byte and its ACK bit.
-        return self._twi_bit_cycles() * (1 if kind == "start" else 9)
+        # Measured on a real ATmega2560 (TWBR 12 and 72): one SCL period plus 6
+        # cycles for a START condition, nine periods plus 1 cycle for a byte and
+        # its ACK bit.
+        bit = self._twi_bit_cycles()
+        return bit + 6 if kind == "start" else 9 * bit + 1
 
     def _twi_complete_start(self) -> None:
         repeated = self._twi_state != "idle"

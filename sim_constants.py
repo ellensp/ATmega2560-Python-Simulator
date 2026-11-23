@@ -124,6 +124,13 @@ class _EmulatorConstants:
     # Cycles from a wake-up interrupt becoming pending in idle sleep to the start
     # of its entry (1 when awake). Measured on a real ATmega2560.
     SLEEP_WAKE_CYCLES = 7
+    # Extra cycles before that when the main clock was stopped (datasheet, not
+    # measured): crystal start-up from power-down / power-save with the Arduino
+    # Mega's fuses (16K CK), and 6 cycles from the standby modes.
+    SLEEP_WAKE_OSC_STARTUP_CYCLES = 16384
+    SLEEP_WAKE_STANDBY_CYCLES = 6
+    # Timer external clock inputs: timer -> (PIN address, bit) for T0, T1, T3, T4, T5.
+    TIMER_CLOCK_PINS = {0: (0x29, 7), 1: (0x29, 6), 3: (0x2C, 6), 4: (0x100, 7), 5: (0x109, 2)}
     DATA_SREG = 0x005F
     DATA_EECR = 0x003F
     DATA_EEDR = 0x0040
@@ -157,6 +164,8 @@ class _EmulatorConstants:
     ADC_ADEN_BIT = 7
     ADC_ADLAR_BIT = 5
     ADC_BASE_CONVERSION_CYCLES = 13
+    # ADC prescaler count right after the write that sets ADEN (fitted to the chip).
+    ADC_ENABLE_PHASE = 7
 
     # Analog comparator (ACSR)
     ACSR_ACIS0_BIT = 0
@@ -220,7 +229,8 @@ class _EmulatorConstants:
     # PCINT8 = PE0 and PCINT9-15 = PJ0-6, PCINT16-23 = PK0-7.
     PCINT_GROUP_PIN_ADDRS = (0x23, 0x2C, 0x103, 0x106)
     # INT0-3 are PD0-3, INT4-7 are PE4-7: registers whose writes can change them.
-    EXTINT_RELEVANT_DATA_ADDRS = {0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x0069, 0x006A}
+    # Ports H and L are included for the T4 and T5 clock inputs.
+    EXTINT_RELEVANT_DATA_ADDRS = {0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x0069, 0x006A, 0x100, 0x101, 0x102, 0x109, 0x10A, 0x10B}
     # Data-space addresses that can change which pins contribute to PCINT groups.
     PCINT_RELEVANT_DATA_ADDRS = {
         DATA_PCMSK0,

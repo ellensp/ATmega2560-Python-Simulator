@@ -486,6 +486,16 @@ t_adif:
   ret
 .global ADC_vect
 ADC_vect:
+  push r24
+  lds r24, isr16
+  sts isr16b, r24
+  lds r24, isr16+1
+  sts isr16b+1, r24
+  lds r24, TCNT1L
+  sts isr16, r24
+  lds r24, TCNT1H
+  sts isr16+1, r24
+  pop r24
   reti
 
 ; SPIF after the SPI interrupt has run.
@@ -1242,3 +1252,252 @@ up_sled_end:
   sbc r19, r25
   movw r24, r18
   ret
+
+; ---- fourth batch ----
+.section .bss
+.global ocr_res, isr16b, twi_time, twi_status
+ocr_res:    .byte 0, 0, 0
+isr16b:     .byte 0, 0
+twi_time:   .byte 0, 0, 0, 0
+twi_status: .byte 0, 0
+.section .text
+
+; OCR1B written while Timer1 runs in the given mode: r24 = TCCR1A, r22 = TCCR1B mode
+; bits, r20 = TOP (ICR1 and OCR1A). OCR1B is 80 before the start and 20 is written
+; about 6 clocks after it. TIFR1 is sampled about 46, 140 and 250 clocks after the
+; start (flags cleared at about 92) into ocr_res.
+.global t_ocrbuf
+t_ocrbuf:
+  sts TCCR1B, r1
+  sts TCCR1A, r1
+  sts TIMSK1, r1
+  sts OCR1AH, r1
+  sts OCR1AL, r20
+  ldi r19, 80
+  sts OCR1BH, r1
+  sts OCR1BL, r19
+  sts TCCR1A, r24
+  sts TCCR1B, r22
+  sts ICR1H, r1
+  sts ICR1L, r20
+  sts TCNT1H, r1
+  sts TCNT1L, r1
+  ldi r19, 0x2F
+  out IO(TIFR1), r19
+  ldi r18, 20
+  ori r22, 1
+  sts TCCR1B, r22
+  sts OCR1BH, r1
+  sts OCR1BL, r18
+  NOPS 40
+  in r18, IO(TIFR1)
+  sts ocr_res, r18
+  NOPS 44
+  out IO(TIFR1), r19
+  NOPS 48
+  in r18, IO(TIFR1)
+  sts ocr_res+1, r18
+  NOPS 100
+  in r18, IO(TIFR1)
+  sts ocr_res+2, r18
+  sts TCCR1B, r1
+  sts TCCR1A, r1
+  out IO(TIFR1), r19
+  ret
+
+; OCR1A as TOP rewritten while running: r24 = TCCR1A, r22 = TCCR1B mode bits.
+; OCR1A is 99 at the start and 49 is written about 6 clocks later; returns TCNT1L
+; after 100 delay loops.
+.global t_topbuf
+t_topbuf:
+  sts TCCR1B, r1
+  sts TCCR1A, r1
+  sts TIMSK1, r1
+  ldi r19, 99
+  sts OCR1AH, r1
+  sts OCR1AL, r19
+  sts TCCR1A, r24
+  sts TCCR1B, r22
+  sts TCNT1H, r1
+  sts TCNT1L, r1
+  ldi r18, 49
+  ori r22, 1
+  sts TCCR1B, r22
+  sts OCR1AH, r1
+  sts OCR1AL, r18
+  ldi r18, 100
+1: dec r18
+  brne 1b
+  sts TCCR1B, r1
+  lds r24, TCNT1L
+  lds r25, TCNT1H
+  sts TCCR1A, r1
+  ldi r19, 0x2F
+  out IO(TIFR1), r19
+  ret
+
+; Timer0 in mode r24 (TCCR0A) / r22 (TCCR0B mode bits): OCR0B is 80 before the start
+; and 20 is written 2 clocks after it; returns TIFR0 about 44 clocks after the start.
+.global t_ocrbuf0
+t_ocrbuf0:
+  out IO(TCCR0B), r1
+  out IO(TCCR0A), r1
+  ldi r19, 200
+  out IO(OCR0A), r19
+  ldi r19, 80
+  out IO(OCR0B), r19
+  out IO(TCCR0A), r24
+  out IO(TCCR0B), r22
+  out IO(TCNT0), r1
+  ldi r19, 7
+  out IO(TIFR0), r19
+  ldi r18, 20
+  ori r22, 1
+  out IO(TCCR0B), r22
+  out IO(OCR0B), r18
+  NOPS 42
+  in r24, IO(TIFR0)
+  out IO(TCCR0B), r1
+  out IO(TCCR0A), r1
+  out IO(TIFR0), r19
+  ret
+
+; ADC at clk/16: cycles from the write that starts a conversion to its interrupt.
+; r24 = 0..47 extra cycles between enabling the ADC and starting; r22 = 0 for the
+; first conversion after enabling, 1 to measure a second one.
+.global t_adc_time
+t_adc_time:
+  ldi r30, pm_lo8(adc_sled_end)
+  ldi r31, pm_hi8(adc_sled_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r18, (1<<REFS0)
+  sts ADMUX, r18
+  sts ADCSRB, r1
+  sts ADCSRA, r1
+  call t1_start
+  ldi r18, (1<<ADEN)|4
+  sts ADCSRA, r18
+  tst r22
+  breq 2f
+  ldi r18, (1<<ADEN)|(1<<ADSC)|4
+  sts ADCSRA, r18
+1: lds r18, ADCSRA
+  sbrc r18, ADSC
+  rjmp 1b
+  ldi r18, (1<<ADEN)|(1<<ADIF)|4
+  sts ADCSRA, r18
+2: ldi r18, (1<<ADEN)|(1<<ADSC)|(1<<ADIE)|4
+  sei
+  ijmp
+  NOPS 48
+adc_sled_end:
+  lds r24, TCNT1L
+  lds r25, TCNT1H
+  sts ADCSRA, r18
+  ldi r18, 250
+3: dec r18
+  brne 3b
+  cli
+  sts ADCSRA, r1
+  lds r18, isr16
+  lds r19, isr16+1
+  sub r18, r24
+  sbc r19, r25
+  movw r24, r18
+  ret
+
+; Free-running ADC at clk/16: cycles between two consecutive conversion interrupts.
+.global t_adc_free
+t_adc_free:
+  ldi r18, (1<<REFS0)
+  sts ADMUX, r18
+  sts ADCSRB, r1
+  sts ADCSRA, r1
+  call t1_start
+  ldi r18, (1<<ADEN)|(1<<ADSC)|(1<<ADATE)|(1<<ADIE)|4
+  sts ADCSRA, r18
+  sei
+  ldi r19, 2
+2: ldi r18, 250
+1: dec r18
+  brne 1b
+  dec r19
+  brne 2b
+  cli
+  sts ADCSRA, r1
+  lds r24, isr16
+  lds r25, isr16+1
+  lds r18, isr16b
+  lds r19, isr16b+1
+  sub r24, r18
+  sbc r25, r19
+  ret
+
+; TWI master with nothing on the bus but the pull-ups: START, then SLA+W for 0x28.
+; r24 = TWBR. Cycles of each go to twi_time, TWSR after each to twi_status.
+.global t_twi
+t_twi:
+  sts TWSR, r1
+  sts TWBR, r24
+  call t1_start
+  ldi r18, (1<<TWINT)|(1<<TWSTA)|(1<<TWEN)|(1<<TWIE)
+  sei
+  lds r24, TCNT1L
+  lds r25, TCNT1H
+  sts TWCR, r18
+  ldi r19, 4
+2: ldi r18, 250
+1: dec r18
+  brne 1b
+  dec r19
+  brne 2b
+  cli
+  lds r18, isr16
+  lds r19, isr16+1
+  sub r18, r24
+  sbc r19, r25
+  sts twi_time, r18
+  sts twi_time+1, r19
+  lds r18, TWSR
+  sts twi_status, r18
+  ldi r18, 0x50
+  sts TWDR, r18
+  call t1_start
+  ldi r18, (1<<TWINT)|(1<<TWEN)|(1<<TWIE)
+  sei
+  lds r24, TCNT1L
+  lds r25, TCNT1H
+  sts TWCR, r18
+  ldi r19, 20
+4: ldi r18, 250
+3: dec r18
+  brne 3b
+  dec r19
+  brne 4b
+  cli
+  lds r18, isr16
+  lds r19, isr16+1
+  sub r18, r24
+  sbc r19, r25
+  sts twi_time+2, r18
+  sts twi_time+3, r19
+  lds r18, TWSR
+  sts twi_status+1, r18
+  ldi r18, (1<<TWINT)|(1<<TWSTO)|(1<<TWEN)
+  sts TWCR, r18
+  NOPS 40
+  sts TWCR, r1
+  ret
+
+.global TWI_vect
+TWI_vect:
+  push r24
+  lds r24, TCNT1L
+  sts isr16, r24
+  lds r24, TCNT1H
+  sts isr16+1, r24
+  ldi r24, (1<<TWEN)
+  sts TWCR, r24
+  pop r24
+  reti

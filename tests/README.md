@@ -75,13 +75,13 @@ Run one specific test method:
 - `test_gpio.py`: GPIO read/write baseline behavior, pull-ups, toggle semantics, and external-drive release handling.
 - `test_gpio_altfunc.py`: Alternate-function pin ownership and waveform-level pin behavior (UART TX, SPI SCK/MOSI, TWI SDA/SCL).
 - `test_hex_loader.py`: Intel HEX loading and image mapping behavior.
-- `test_hwcheck.py`: runs `examples/hwcheck/hwcheck.hex` and compares all 125 values with the output of a real ATmega2560.
+- `test_hwcheck.py`: runs `examples/hwcheck/hwcheck.hex` and compares all 162 values with the output of a real ATmega2560.
 - `test_int0.py`: Focused `INT0` behavior tests.
 - `test_interrupts.py`: Generic ISR dispatch/priority and interrupt control flow tests.
 - `test_isr_firmware.py`: ISR-driven firmware integration-style patterns.
 - `test_opcode_tester.py`: Opcode matrix verification harness behavior and decode/execute coverage checks.
 - `test_pcint.py`: Pin-change interrupt (`PCINT0..2`) mask/flag/dispatch behavior.
-- `test_review_fixes.py`: sleep modes, INT0-7 driven by their pins, PCINT8-15 mapping, watchdog after a watchdog reset, Timer1 ICR/OCR-TOP modes, the shared timer prescaler, USART frame timing.
+- `test_review_fixes.py`: sleep modes, INT0-7 driven by their pins, PCINT8-15 mapping, watchdog after a watchdog reset, Timer1 ICR/OCR-TOP modes, the shared timer prescaler, OCR double buffering, timer external clocks, ADC auto-trigger, wake from power-down, USART frame timing.
 - `test_run_hex.py`: `run_hex.py` integration tests including UART TCP bridge behavior.
 - `test_spi.py`: SPI controller (`SPCR`, `SPSR`, `SPDR`) transfer/flags/collision/interrupt behavior.
 - `test_timer0.py`: Timer0 modes, counting, flags, and interrupt behavior.

@@ -225,6 +225,13 @@ class _GpioMixin:
             self._ext_int_levels[index] = level
         self._ext_level_mask = level_mask
 
+        # Timer external clock inputs (T0, T1, T3, T4, T5): one count per selected edge.
+        for n, (pin_addr, bit) in self.TIMER_CLOCK_PINS.items():
+            level = ((self._read_port_by_pin_addr(pin_addr) or 0) >> bit) & 1
+            if level != self._timer_pin_levels[n]:
+                self._timer_pin_levels[n] = level
+                (self.timer0 if n == 0 else self._timers16[n]).external_edge(bool(level), self.data)
+
     def set_pin_level(self, port: str, bit: int, level: int) -> None:
         """Drive a simulated external logic level onto a GPIO input pin."""
         if bit < 0 or bit > 7:
@@ -241,7 +248,7 @@ class _GpioMixin:
             self.data[pin_addr] &= ~mask & 0xFF
         if pin_addr in self.PCINT_GROUP_PIN_ADDRS:
             self._pcint_dirty = True
-        if pin_addr in (0x29, 0x2C):
+        if pin_addr in (0x29, 0x2C, 0x100, 0x109):
             self._extint_dirty = True
             self._update_ext_int_flags()
 
@@ -257,6 +264,6 @@ class _GpioMixin:
         self.data[pin_addr] &= ~mask & 0xFF
         if pin_addr in self.PCINT_GROUP_PIN_ADDRS:
             self._pcint_dirty = True
-        if pin_addr in (0x29, 0x2C):
+        if pin_addr in (0x29, 0x2C, 0x100, 0x109):
             self._extint_dirty = True
             self._update_ext_int_flags()

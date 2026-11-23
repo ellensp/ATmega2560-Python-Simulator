@@ -12,16 +12,21 @@ def _write16(data: bytearray, lo_addr: int, hi_addr: int, value: int) -> None:
 
 
 class _TimerBase:
-    """Clocking shared by all timers.
+    """Clocking, OCR buffering and external clocking shared by all timers.
 
     Timer0, 1, 3, 4 and 5 count edges of one shared prescaler, so the position
     of a prescaled tick does not depend on when a timer was started. Measured
     on a real ATmega2560: that prescaler only runs while at least one of those
     timers has a clock selected, and keeps its count while they are all stopped.
     The emulator passes its count before the cycles being advanced.
+
+    In the PWM modes a write to OCRnx goes to a buffer and reaches the compare
+    register at BOTTOM (fast PWM, phase and frequency correct) or at TOP (phase
+    correct); in the normal and CTC modes it takes effect at once (measured).
     """
 
     SHARED_PRESCALER = True
+    EXTERNAL_CLOCK = True  # CS = 6 / 7 count falling / rising edges of the Tn pin
 
     _PRESCALE = {
         0b001: 1,
@@ -36,11 +41,16 @@ class _TimerBase:
         self._count_up = True
         # A write to TCNT blocks the compare match on the next timer clock.
         self._compare_block = False
+        # Compare register values in use (A, B, C); data[] holds the OCR buffers.
+        self._ocr_active = [0, 0, 0]
+        self._was_pwm = False
 
     def reset(self) -> None:
         self._prescaler_accum = 0
         self._count_up = True
         self._compare_block = False
+        self._ocr_active = [0, 0, 0]
+        self._was_pwm = False
 
     def _ticks(self, cycles: int, div: int, prescaler: int | None) -> int:
         if div == 1:
@@ -52,6 +62,26 @@ class _TimerBase:
             return ticks
         return (prescaler + cycles) // div - prescaler // div
 
+    def _clock_select(self, data: bytearray) -> int:
+        raise NotImplementedError
+
+    def _run_ticks(self, ticks: int, data: bytearray) -> None:
+        raise NotImplementedError
+
+    def _is_pwm_mode(self, data: bytearray) -> bool:
+        raise NotImplementedError
+
+    def mode_written(self, data: bytearray) -> None:
+        """TCCRnA/B was written: outside the PWM modes OCR writes are unbuffered again."""
+        if not self._is_pwm_mode(data):
+            self._was_pwm = False
+
+    def external_edge(self, rising: bool, data: bytearray) -> None:
+        """An edge on the timer's Tn pin: one count if that edge is the clock source."""
+        cs = self._clock_select(data)
+        if self.EXTERNAL_CLOCK and ((cs == 7 and rising) or (cs == 6 and not rising)):
+            self._run_ticks(1, data)
+
 
 class _Timer8(_TimerBase):
     """8-bit timer: normal, CTC, fast PWM and phase-correct PWM counting.
@@ -62,38 +92,53 @@ class _Timer8(_TimerBase):
     phase-correct modes. The OCnx output pins are not modelled.
     """
 
-    def _advance8(
-        self,
-        cycles: int,
-        data: bytearray,
-        prescaler: int | None,
-        tccra: int,
-        tccrb: int,
-        tcnt: int,
-        ocra: int,
-        ocrb: int,
-        tifr: int,
-        div: int | None,
-    ) -> None:
-        if cycles <= 0 or div is None:
+    _ASYNC_SCALE = 1
+    # Data-space addresses, set by the subclass: TCCRnA, TCCRnB, TCNTn, OCRnA, OCRnB, TIFRn.
+    _REGS = (0, 0, 0, 0, 0, 0)
+
+    def _clock_select(self, data: bytearray) -> int:
+        return data[self._REGS[1]] & 0x7
+
+    def _divisor(self, data: bytearray) -> int | None:
+        return self._PRESCALE.get(data[self._REGS[1]] & 0x7)
+
+    def _is_pwm_mode(self, data: bytearray) -> bool:
+        return (data[self._REGS[0]] & 0x01) != 0  # WGMn0 is set in every PWM mode
+
+    def advance(self, cycles: int, data: bytearray, prescaler: int | None = None) -> None:
+        if cycles <= 0:
+            return
+        div = self._divisor(data)
+        if div is None:
             return
         ticks = self._ticks(cycles, div, prescaler)
-        if not ticks:
-            return
+        if ticks:
+            self._run_ticks(ticks, data)
 
+    def _run_ticks(self, ticks: int, data: bytearray) -> None:
+        tccra, tccrb, tcnt, ocra, ocrb, tifr = self._REGS
         mode = (((data[tccrb] >> 3) & 1) << 2) | (data[tccra] & 0x03)
         ctc = mode == 0b010
         fast = mode in (0b011, 0b111)
         phase = mode in (0b001, 0b101)
         ocra_top = mode in (0b101, 0b111)
+        pwm = fast or phase
+        active = self._ocr_active
+        if not pwm or not self._was_pwm:
+            active[0] = data[ocra]
+            active[1] = data[ocrb]
+        self._was_pwm = pwm
 
         for _ in range(ticks):
             cur = data[tcnt]
-            ocra_val = data[ocra]
+            if not pwm:
+                active[0] = data[ocra]
+                active[1] = data[ocrb]
+            ocra_val = active[0]
             if self._compare_block:
                 self._compare_block = False
             else:
-                if cur == data[ocrb]:
+                if cur == active[1]:
                     data[tifr] |= 0x04
                 if cur == ocra_val:
                     data[tifr] |= 0x02
@@ -105,6 +150,8 @@ class _Timer8(_TimerBase):
                     self._count_up = True
                 if self._count_up and cur >= top:
                     self._count_up = False
+                    active[0] = data[ocra]  # OCR buffers are loaded at TOP
+                    active[1] = data[ocrb]
                 if self._count_up:
                     data[tcnt] = cur + 1
                 else:
@@ -115,6 +162,8 @@ class _Timer8(_TimerBase):
                 if cur >= top:
                     data[tcnt] = 0
                     data[tifr] |= 0x01
+                    active[0] = data[ocra]  # OCR buffers are loaded at BOTTOM
+                    active[1] = data[ocrb]
                 else:
                     data[tcnt] = cur + 1
             else:
@@ -126,8 +175,8 @@ class _Timer8(_TimerBase):
 
 class _Timer16(_TimerBase):
     """16-bit timer covering all sixteen waveform generation modes: counting
-    sequence and the TOV, OCF and ICF flags. The OCnx output pins and the OCR
-    double buffering of the PWM modes are not modelled.
+    sequence, the TOV, OCF and ICF flags and the OCR double buffering of the
+    PWM modes. The OCnx output pins are not modelled.
 
     Measured on a real ATmega2560: every mode has a period of TOP + 1 timer
     clocks (2 * TOP in the phase-correct modes), compare flags are set on the
@@ -136,24 +185,25 @@ class _Timer16(_TimerBase):
 
     _N = 1
 
-    # WGMn3:0 -> (counting, TOP): TOP is a fixed value, "ocra" or "icr".
+    # WGMn3:0 -> (counting, TOP, where the OCR buffers are loaded): TOP is a fixed
+    # value, "ocra" or "icr".
     _MODES = {
-        0: ("normal", None),
-        1: ("phase", 0x00FF),
-        2: ("phase", 0x01FF),
-        3: ("phase", 0x03FF),
-        4: ("ctc", "ocra"),
-        5: ("fast", 0x00FF),
-        6: ("fast", 0x01FF),
-        7: ("fast", 0x03FF),
-        8: ("phase", "icr"),
-        9: ("phase", "ocra"),
-        10: ("phase", "icr"),
-        11: ("phase", "ocra"),
-        12: ("ctc", "icr"),
-        13: ("normal", None),
-        14: ("fast", "icr"),
-        15: ("fast", "ocra"),
+        0: ("normal", None, None),
+        1: ("phase", 0x00FF, "top"),
+        2: ("phase", 0x01FF, "top"),
+        3: ("phase", 0x03FF, "top"),
+        4: ("ctc", "ocra", None),
+        5: ("fast", 0x00FF, "bottom"),
+        6: ("fast", 0x01FF, "bottom"),
+        7: ("fast", 0x03FF, "bottom"),
+        8: ("phase", "icr", "bottom"),
+        9: ("phase", "ocra", "bottom"),
+        10: ("phase", "icr", "top"),
+        11: ("phase", "ocra", "top"),
+        12: ("ctc", "icr", None),
+        13: ("normal", None, None),
+        14: ("fast", "icr", "bottom"),
+        15: ("fast", "ocra", "bottom"),
     }
 
     def __init__(self) -> None:
@@ -168,37 +218,54 @@ class _Timer16(_TimerBase):
         self._ocrc = getattr(self, f"DATA_OCR{n}CL")
         self._tifr = 0x20 + getattr(self, f"IO_TIFR{n}")
 
+    def _clock_select(self, data: bytearray) -> int:
+        return data[self._tccrb] & 0x7
+
     def advance(self, cycles: int, data: bytearray, prescaler: int | None = None) -> None:
         if cycles <= 0:
             return
-        tccrb = data[self._tccrb]
-        div = self._PRESCALE.get(tccrb & 0x7)
+        div = self._PRESCALE.get(data[self._tccrb] & 0x7)
         if div is None:
             return
         ticks = self._ticks(cycles, div, prescaler)
-        if not ticks:
-            return
+        if ticks:
+            self._run_ticks(ticks, data)
 
-        kind, top_src = self._MODES[(((tccrb >> 3) & 0x3) << 2) | (data[self._tccra] & 0x3)]
+    def _is_pwm_mode(self, data: bytearray) -> bool:
+        return self._MODES[(((data[self._tccrb] >> 3) & 0x3) << 2) | (data[self._tccra] & 0x3)][2] is not None
+
+    def _load_ocr(self, data: bytearray) -> None:
+        active = self._ocr_active
+        ocra, ocrb, ocrc = self._ocra, self._ocrb, self._ocrc
+        active[0] = data[ocra] | (data[ocra + 1] << 8)
+        active[1] = data[ocrb] | (data[ocrb + 1] << 8)
+        active[2] = data[ocrc] | (data[ocrc + 1] << 8)
+
+    def _run_ticks(self, ticks: int, data: bytearray) -> None:
+        kind, top_src, update = self._MODES[(((data[self._tccrb] >> 3) & 0x3) << 2) | (data[self._tccra] & 0x3)]
         tcnt = self._tcnt
         tifr = self._tifr
-        ocra = self._ocra
-        ocrb = self._ocrb
-        ocrc = self._ocrc
         icr = self._icr
         icr_top = top_src == "icr"
+        pwm = update is not None
+        active = self._ocr_active
+        if not pwm or not self._was_pwm:
+            self._load_ocr(data)
+        self._was_pwm = pwm
 
         for _ in range(ticks):
             cur = data[tcnt] | (data[tcnt + 1] << 8)
-            ocra_val = data[ocra] | (data[ocra + 1] << 8)
+            if not pwm:
+                self._load_ocr(data)
+            ocra_val = active[0]
             if self._compare_block:
                 self._compare_block = False
             else:
                 if cur == ocra_val:
                     data[tifr] |= 0x02
-                if cur == (data[ocrb] | (data[ocrb + 1] << 8)):
+                if cur == active[1]:
                     data[tifr] |= 0x04
-                if cur == (data[ocrc] | (data[ocrc + 1] << 8)):
+                if cur == active[2]:
                     data[tifr] |= 0x08
 
             if kind == "normal":
@@ -228,16 +295,21 @@ class _Timer16(_TimerBase):
                         data[tifr] |= 0x01
                         if icr_top:
                             data[tifr] |= 0x20
+                        self._load_ocr(data)
                     else:
                         nxt = cur + 1
                 else:  # phase-correct: up to TOP, down to BOTTOM
                     if cur == 0:
                         data[tifr] |= 0x01
                         self._count_up = True
+                        if update == "bottom":
+                            self._load_ocr(data)
                     if self._count_up and cur >= top:
                         self._count_up = False
                         if icr_top:
                             data[tifr] |= 0x20
+                        if update == "top":
+                            self._load_ocr(data)
                     if self._count_up:
                         nxt = cur + 1
                     else:
@@ -263,13 +335,7 @@ class Timer0(_Timer8):
     OCF0A_BIT = 1
     OCF0B_BIT = 2
 
-    def advance(self, cycles: int, data: bytearray, prescaler: int | None = None) -> None:
-        div = self._PRESCALE.get(data[0x20 + self.IO_TCCR0B] & 0x7)
-        self._advance8(
-            cycles, data, prescaler,
-            0x20 + self.IO_TCCR0A, 0x20 + self.IO_TCCR0B, 0x20 + self.IO_TCNT0,
-            0x20 + self.IO_OCR0A, 0x20 + self.IO_OCR0B, 0x20 + self.IO_TIFR0, div,
-        )
+    _REGS = (0x20 + IO_TCCR0A, 0x20 + IO_TCCR0B, 0x20 + IO_TCNT0, 0x20 + IO_OCR0A, 0x20 + IO_OCR0B, 0x20 + IO_TIFR0)
 
 
 class Timer1(_Timer16):
@@ -335,15 +401,17 @@ class Timer2(_Timer8):
     # Baseline approximation for asynchronous Timer2 domain versus CPU cycles.
     _ASYNC_SCALE = 128
 
-    def advance(self, cycles: int, data: bytearray, prescaler: int | None = None) -> None:
+    EXTERNAL_CLOCK = False  # CS = 6 / 7 are clk/256 and clk/1024 on Timer2
+    _REGS = (DATA_TCCR2A, DATA_TCCR2B, DATA_TCNT2, DATA_OCR2A, DATA_OCR2B, 0x20 + IO_TIFR2)
+
+    def _divisor(self, data: bytearray) -> int | None:
         div = self._PRESCALE.get(data[self.DATA_TCCR2B] & 0x7)
         if div is not None and ((data[self.DATA_ASSR] >> self.AS2_BIT) & 1) == 1:
             div *= self._ASYNC_SCALE
-        self._advance8(
-            cycles, data, None,
-            self.DATA_TCCR2A, self.DATA_TCCR2B, self.DATA_TCNT2,
-            self.DATA_OCR2A, self.DATA_OCR2B, 0x20 + self.IO_TIFR2, div,
-        )
+        return div
+
+    def advance(self, cycles: int, data: bytearray, prescaler: int | None = None) -> None:
+        super().advance(cycles, data, None)
 
 
 class Timer3(_Timer16):

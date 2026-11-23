@@ -13,7 +13,11 @@ uint8_t t_irq_lat_pc(void), t_presc(uint8_t k), t_eere(void), t_eepe(void), t_ee
 uint8_t t_spi_done0(uint8_t spcr, uint8_t spsr, uint8_t n), t_spi_done1(uint8_t spcr, uint8_t spsr, uint8_t n), t_spi_done2(uint8_t spcr, uint8_t spsr, uint8_t n);
 uint16_t t_uart_frame(uint8_t n), t_uart_udre(uint8_t n), t_uart_frame2(uint8_t d), t_uart_udre2(uint8_t d), t_uart_txc2(uint8_t d);
 uint8_t t_presc_b(uint8_t k), t_presc_c(uint8_t k), t_presc_d(uint8_t k), t_presc_e(uint8_t k), t_gtccr(void), t_presc_f(uint8_t j), t_presc_h(uint8_t j), t_presc_i(uint8_t j);
-extern uint8_t last_tifr;
+extern uint8_t last_tifr, ocr_res[3], twi_status[2];
+extern uint16_t twi_time[2];
+void t_ocrbuf(uint8_t a, uint8_t b, uint8_t top), t_twi(uint8_t twbr);
+uint8_t t_topbuf(uint8_t a, uint8_t b), t_ocrbuf0(uint8_t a, uint8_t b);
+uint16_t t_adc_time(uint8_t d, uint8_t second), t_adc_free(void);
 uint8_t t_irq_lat2(uint8_t ocr), t_irq_lat3(uint8_t ocr);
 uint8_t t_start_read1(void), t_start_read0(void), t_irq_sei(void), t_irq_mask(void), t_adif(void), t_spif(void), t_txc(void);
 extern uint8_t ord_t0, ord_t1, ord_t2;
@@ -59,6 +63,20 @@ static uint16_t spi_time(uint8_t spcr, uint8_t spsr) {
   return hi;
 }
 
+static void named(const char *name, char suffix, uint8_t v) {
+  char buf[12]; uint8_t i = 0;
+  while (name[i]) { buf[i] = name[i]; i++; }
+  buf[i] = suffix; buf[i + 1] = 0;
+  line(buf, v);
+}
+
+static void ocrbuf(const char *name, uint8_t a, uint8_t b, uint8_t top) {
+  t_ocrbuf(a, b, top);
+  named(name, '1', ocr_res[0]);
+  named(name, '2', ocr_res[1]);
+  named(name, '3', ocr_res[2]);
+}
+
 int main(void) {
   cli();
   UCSR0A = _BV(U2X0);
@@ -66,7 +84,7 @@ int main(void) {
   UCSR0B = _BV(TXEN0);
   UCSR0C = _BV(UCSZ01) | _BV(UCSZ00);
 
-  puts_("HWCHECK 9\r\n");
+  puts_("HWCHECK 10\r\n");
   uint8_t base = t_base();
   line("base", base);
   line("nop", t_nop() - base);
@@ -141,6 +159,28 @@ int main(void) {
   line16("spi_f8", spi_time(0x51, 1));
   while (!(UCSR0A & _BV(UDRE0))) {}
   line("txc", t_txc());
+  ocrbuf("ob0_", 0x00, 0x00, 200);   // normal
+  ocrbuf("ob4_", 0x00, 0x08, 200);   // CTC
+  ocrbuf("ob5_", 0x01, 0x08, 200);   // fast PWM, 8-bit
+  ocrbuf("ob14_", 0x02, 0x18, 200);  // fast PWM, TOP = ICR1
+  ocrbuf("ob1_", 0x01, 0x00, 100);   // phase correct, 8-bit
+  ocrbuf("ob10_", 0x02, 0x10, 100);  // phase correct, TOP = ICR1
+  ocrbuf("ob8_", 0x00, 0x10, 100);   // phase and frequency correct, TOP = ICR1
+  line("tb4", t_topbuf(0x00, 0x08));   // CTC, TOP = OCR1A
+  line("tb15", t_topbuf(0x03, 0x18));  // fast PWM, TOP = OCR1A
+  line("tb11", t_topbuf(0x03, 0x10));  // phase correct, TOP = OCR1A
+  line("tb9", t_topbuf(0x01, 0x10));   // phase and frequency correct, TOP = OCR1A
+  line("ob0n", t_ocrbuf0(0x00, 0x00));  // Timer0 normal
+  line("ob0f", t_ocrbuf0(0x03, 0x00));  // Timer0 fast PWM
+  line("ob0p", t_ocrbuf0(0x01, 0x00));  // Timer0 phase correct
+  puts_("adc1="); for (uint8_t d = 0; d < 20; d++) { uint16_t v = t_adc_time(d, 0); hex(v >> 8); hex(v & 0xFF); put(' '); } puts_("\r\n");
+  puts_("adc2="); for (uint8_t d = 0; d < 20; d++) { uint16_t v = t_adc_time(d, 1); hex(v >> 8); hex(v & 0xFF); put(' '); } puts_("\r\n");
+  line16("adc_free", t_adc_free());
+  t_twi(72);
+  line16("twi72_start", twi_time[0]); line("twi72_start_st", twi_status[0]);
+  line16("twi72_addr", twi_time[1]); line("twi72_addr_st", twi_status[1]);
+  t_twi(12);
+  line16("twi12_start", twi_time[0]); line16("twi12_addr", twi_time[1]);
   line16("uart_udre_10", t_uart_udre(10));
   line16("uart_udre_23", t_uart_udre(23));
   // The EEPROM write is timed by an RC oscillator, so it comes last: nothing

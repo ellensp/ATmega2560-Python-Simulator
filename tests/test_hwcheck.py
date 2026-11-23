@@ -17,6 +17,7 @@ def _values(text: str) -> dict[str, str]:
     out: dict[str, str] = {}
     for line in text.splitlines():
         name, sep, value = line.strip().partition("=")
+        value = value.strip()
         if sep:
             out[name] = value
     return out
@@ -25,9 +26,10 @@ def _values(text: str) -> dict[str, str]:
 class TestHardwareComparison(unittest.TestCase):
     def test_simulator_matches_real_atmega2560(self) -> None:
         expected = _values((HWCHECK_DIR / "atmega2560_hardware.txt").read_text())
-        self.assertEqual(len(expected), 125)
+        self.assertEqual(len(expected), 162)
 
         emu = ATmega2560Emulator()
+        emu.set_twi_devices([])  # nothing on the bus but the board's pull-ups
         emu.load_program_hex(str(HWCHECK_DIR / "hwcheck.hex"))
         for _ in range(6_000_000):
             emu.step()

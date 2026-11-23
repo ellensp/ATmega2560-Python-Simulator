@@ -16,7 +16,7 @@ class TestADCController(unittest.TestCase):
         emu._data_write(emu.DATA_ADMUX, 0x00)
         emu._data_write(emu.DATA_ADCSRA, (1 << emu.ADC_ADEN_BIT) | (1 << emu.ADC_ADSC_BIT))
 
-        for _ in range(50):  # first conversion: 25 ADC clocks at clk/2
+        for _ in range(54):  # first conversion: 25 ADC clocks at clk/2, from the next ADC clock edge
             emu.step()
 
         self.assertEqual(emu.data[emu.DATA_ADCL], 0xAB)
@@ -29,7 +29,7 @@ class TestADCController(unittest.TestCase):
         emu.set_adc_channel_value(0, 0x0015)
         emu._data_write(emu.DATA_ADCSRA, (1 << emu.ADC_ADEN_BIT) | (1 << emu.ADC_ADSC_BIT))
 
-        for _ in range(50):  # first conversion: 25 ADC clocks at clk/2
+        for _ in range(54):  # first conversion: 25 ADC clocks at clk/2, from the next ADC clock edge
             emu.step()
 
         self.assertEqual((emu.data[emu.DATA_ADCSRA] >> emu.ADC_ADIF_BIT) & 1, 1)
@@ -43,7 +43,7 @@ class TestADCController(unittest.TestCase):
         emu._data_write(emu.DATA_ADMUX, 1 << emu.ADC_ADLAR_BIT)
         emu._data_write(emu.DATA_ADCSRA, (1 << emu.ADC_ADEN_BIT) | (1 << emu.ADC_ADSC_BIT))
 
-        for _ in range(50):  # first conversion: 25 ADC clocks at clk/2
+        for _ in range(54):  # first conversion: 25 ADC clocks at clk/2, from the next ADC clock edge
             emu.step()
 
         self.assertEqual(emu.data[emu.DATA_ADCH], 0xAA)
@@ -71,7 +71,7 @@ class TestADCController(unittest.TestCase):
             (1 << emu.ADC_ADEN_BIT) | (1 << emu.ADC_ADIE_BIT) | (1 << emu.ADC_ADSC_BIT),
         )
 
-        for _ in range(50):  # first conversion: 25 ADC clocks at clk/2
+        for _ in range(52):  # first conversion at clk/2: exactly 1 + 50 + 1 cycles
             emu.step()
 
         self.assertEqual((emu.data[emu.DATA_ADCSRA] >> emu.ADC_ADIF_BIT) & 1, 1)
@@ -95,7 +95,7 @@ class TestADCChannelSelect(unittest.TestCase):
     def _read_adc_result(self, emu: ATmega2560Emulator) -> int:
         return emu.data[emu.DATA_ADCL] | (emu.data[emu.DATA_ADCH] << 8)
 
-    def _convert(self, emu: ATmega2560Emulator, admux: int, adcsrb: int = 0, steps: int = 50) -> int:
+    def _convert(self, emu: ATmega2560Emulator, admux: int, adcsrb: int = 0, steps: int = 54) -> int:
         """Write ADCSRB/ADMUX, trigger a conversion, run *steps* NOP cycles, return result."""
         emu._data_write(emu.DATA_ADCSRB, adcsrb)
         emu._data_write(emu.DATA_ADMUX, admux)
@@ -200,20 +200,21 @@ class TestADCPrescaler(unittest.TestCase):
         self.assertEqual(self._adsc(emu), 0, f"should complete at cycle {cycles}")
 
     def test_first_conversion_takes_25_adc_clocks(self) -> None:
-        """ADPS 0 and 1 both select clk/2; the first conversion after ADEN takes 25 ADC clocks."""
-        self._check_first_conversion(0b000, 50)
-        self._check_first_conversion(0b001, 50)
-        self._check_first_conversion(0b010, 100)
-        self._check_first_conversion(0b011, 200)
+        """ADPS 0 and 1 both select clk/2; the first conversion after ADEN takes 25 ADC
+        clocks, plus the wait for the next ADC clock edge (1 cycle here) and 1 cycle."""
+        self._check_first_conversion(0b000, 52)
+        self._check_first_conversion(0b001, 52)
+        self._check_first_conversion(0b010, 102)
+        self._check_first_conversion(0b011, 202)
 
     def test_later_conversions_take_13_adc_clocks(self) -> None:
         emu = self._new_emu()
         self._start_conversion(emu, adps=0b010)
-        for _ in range(100):
+        for _ in range(105):  # the ADC clock (clk/4) is on an edge again here
             emu.step()
         self.assertEqual(self._adsc(emu), 0)
         self._start_conversion(emu, adps=0b010)
-        for _ in range(51):
+        for _ in range(4 + 52):  # a full ADC clock of waiting, then 13 clocks
             emu.step()
         self.assertEqual(self._adsc(emu), 1)
         emu.step()
@@ -223,7 +224,7 @@ class TestADCPrescaler(unittest.TestCase):
         emu = self._new_emu()
         emu.set_adc_channel_value(0, 0x111)
         emu._data_write(emu.DATA_ADCSRA, (1 << emu.ADC_ADEN_BIT) | (1 << emu.ADC_ADSC_BIT) | (1 << emu.ADC_ADATE_BIT))
-        for _ in range(50):
+        for _ in range(52):
             emu.step()
         self.assertEqual(emu.data[emu.DATA_ADCL] | (emu.data[emu.DATA_ADCH] << 8), 0x111)
         self.assertEqual(self._adsc(emu), 1, "the next conversion started by itself")
@@ -236,19 +237,19 @@ class TestADCPrescaler(unittest.TestCase):
         emu = self._new_emu()
         self._start_conversion(emu, adps=0)
         emu.set_adc_channel_value(0, 0x155)
-        for _ in range(50):
+        for _ in range(54):
             emu.step()
         emu._data_write(emu.DATA_ADCL, 0xFF)
         emu._data_write(emu.DATA_ADCH, 0xFF)
         self.assertEqual(emu._data_read(emu.DATA_ADCL), 0x55)  # locks the result
         self._start_conversion(emu, adps=0)
         emu.set_adc_channel_value(0, 0x2AA)
-        for _ in range(26):
+        for _ in range(30):
             emu.step()
         self.assertEqual(emu._data_read(emu.DATA_ADCH), 0x01)  # old high byte; unlocks
         self._start_conversion(emu, adps=0)
         emu.set_adc_channel_value(0, 0x2AA)
-        for _ in range(26):
+        for _ in range(30):
             emu.step()
         self.assertEqual(emu._data_read(emu.DATA_ADCL), 0xAA)
         self.assertEqual(emu._data_read(emu.DATA_ADCH), 0x02)
@@ -257,7 +258,7 @@ class TestADCPrescaler(unittest.TestCase):
         """The sampled value is independent of which prescaler is chosen."""
         for adps in range(8):
             with self.subTest(adps=adps):
-                cycles = 25 * max(2, 1 << adps)
+                cycles = 25 * max(2, 1 << adps) + max(2, 1 << adps) + 1
                 emu = ATmega2560Emulator()
                 emu.load_program_words([0x0000] * (cycles + 8))
                 emu.set_adc_channel_value(0, 0x3AB)
@@ -287,7 +288,7 @@ class TestADCLeftAdjustHighChannels(unittest.TestCase):
         emu._data_write(emu.DATA_ADCSRB, adcsrb)
         emu._data_write(emu.DATA_ADMUX,  admux)
         emu._data_write(emu.DATA_ADCSRA, (1 << emu.ADC_ADEN_BIT) | (1 << emu.ADC_ADSC_BIT))
-        for _ in range(50):  # first conversion: 25 ADC clocks at clk/2
+        for _ in range(54):  # first conversion: 25 ADC clocks at clk/2, from the next ADC clock edge
             emu.step()
         return emu.data[emu.DATA_ADCH], emu.data[emu.DATA_ADCL]
 
@@ -339,7 +340,7 @@ class TestADCInterruptHighChannels(unittest.TestCase):
             emu.DATA_ADCSRA,
             (1 << emu.ADC_ADEN_BIT) | (1 << emu.ADC_ADIE_BIT) | (1 << emu.ADC_ADSC_BIT),
         )
-        for _ in range(50):  # first conversion: 25 ADC clocks at clk/2
+        for _ in range(52):  # first conversion at clk/2: exactly 1 + 50 + 1 cycles
             emu.step()
         return emu
 
