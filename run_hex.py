@@ -3,7 +3,7 @@ import socket
 import sys
 import time
 
-from sim import ATmega2560Emulator
+from sim import ATmega2560Emulator, EMULATORS, create_emulator
 
 
 def _format_regs(regs: list[int]) -> str:
@@ -264,8 +264,9 @@ def _render_visual(emu: ATmega2560Emulator, step: int, dcyc: int, desc: str, opc
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run an AVR Intel HEX image in the ATmega2560 emulator.")
+    parser = argparse.ArgumentParser(description="Run an AVR Intel HEX image in the ATmega2560 / ATmega1280 emulator.")
     parser.add_argument("hex_file", help="Path to Intel HEX file")
+    parser.add_argument("--mcu", default="atmega2560", choices=sorted(EMULATORS), help="MCU to emulate")
     parser.add_argument("--steps", type=int, default=1000, help="Maximum instruction steps")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print per-instruction trace")
     parser.add_argument("--visual", action="store_true", help="Print visual I/O port state view while running")
@@ -305,7 +306,7 @@ def main() -> None:
         raise SystemExit("UART bridge supports only USART0..USART3.")
     uart_index = int(uart_text)
 
-    emu = ATmega2560Emulator()
+    emu = create_emulator(args.mcu)
     emu.load_program_hex(args.hex_file)
     if args.reset_before_run:
         emu.reset()

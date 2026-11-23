@@ -36,6 +36,8 @@ def load_hex_bytes(path: str) -> bytes:
     Supported record types:
     - 00: data
     - 01: end-of-file
+    - 02: extended segment address (base = value * 16)
+    - 03, 05: start address (ignored)
     - 04: extended linear address
     """
 
@@ -43,7 +45,7 @@ def load_hex_bytes(path: str) -> bytes:
     lines = p.read_text(encoding="ascii").splitlines()
 
     flash_bytes: dict[int, int] = {}
-    upper = 0
+    base_addr = 0
 
     for i, line in enumerate(lines, start=1):
         if not line.strip():
@@ -52,7 +54,7 @@ def load_hex_bytes(path: str) -> bytes:
         _, addr, rectype, data, _ = _parse_hex_line(line)
 
         if rectype == 0x00:
-            base = (upper << 16) + addr
+            base = base_addr + addr
             for off, b in enumerate(data):
                 flash_bytes[base + off] = b
         elif rectype == 0x01:
@@ -60,7 +62,13 @@ def load_hex_bytes(path: str) -> bytes:
         elif rectype == 0x04:
             if len(data) != 2:
                 raise ValueError(f"Line {i}: invalid extended linear address record")
-            upper = (data[0] << 8) | data[1]
+            base_addr = ((data[0] << 8) | data[1]) << 16
+        elif rectype == 0x02:
+            if len(data) != 2:
+                raise ValueError(f"Line {i}: invalid extended segment address record")
+            base_addr = ((data[0] << 8) | data[1]) << 4
+        elif rectype in (0x03, 0x05):
+            continue
         else:
             raise ValueError(f"Line {i}: unsupported record type 0x{rectype:02X}")
 

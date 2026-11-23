@@ -44,6 +44,24 @@ class TestHexLoader(unittest.TestCase):
 
         Path(path).unlink(missing_ok=True)
 
+    def test_extended_segment_address_record(self) -> None:
+        # Segment 0x1000 -> base 0x10000; start segment (03) and start linear (05) records are ignored.
+        hex_text = (
+            ":020000021000EC\n"
+            ":0200000005E019\n"
+            ":0400000300000000F9\n"
+            ":0400000500000000F7\n"
+            ":00000001FF\n"
+        )
+        path = self.write_hex(hex_text)
+        data = load_hex_bytes(path)
+
+        self.assertEqual(len(data), 0x10002)
+        self.assertEqual(data[0x10000], 0x05)
+        self.assertEqual(data[0x10001], 0xE0)
+
+        Path(path).unlink(missing_ok=True)
+
     def test_bad_checksum_raises(self) -> None:
         # Last byte intentionally wrong checksum (should not be 0x00).
         bad_hex = ":0400000005E013E000\n:00000001FF\n"
@@ -55,8 +73,8 @@ class TestHexLoader(unittest.TestCase):
         Path(path).unlink(missing_ok=True)
 
     def test_unsupported_record_type_raises(self) -> None:
-        # Record type 02 is not currently supported.
-        bad_hex = ":020000021234B6\n:00000001FF\n"
+        # Record type 06 is not an Intel HEX record type.
+        bad_hex = ":020000061234B0\n:00000001FF\n"
         path = self.write_hex(bad_hex)
 
         with self.assertRaises(ValueError):

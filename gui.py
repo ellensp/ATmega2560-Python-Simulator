@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from sim import ATmega2560Emulator
+from sim import ATmega2560Emulator, EMULATORS, create_emulator
 
 
 class SimpleTooltip:
@@ -53,9 +53,9 @@ class EmulatorGUI:
     PROFILE_HEAT_LEVELS = 64
     PROFILE_FLASH_CONTEXT_ROWS = 2
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, mcu: str = "atmega2560") -> None:
         self.root = root
-        self.emu = ATmega2560Emulator()
+        self.emu = create_emulator(mcu)
         self.loaded_path: str | None = None
 
         self.running = False
@@ -1929,6 +1929,7 @@ def main() -> None:
         dest="load_path",
         help="Program image path to load at startup (.hex/.hx/.bin)",
     )
+    parser.add_argument("--mcu", default="atmega2560", choices=sorted(EMULATORS), help="MCU to emulate")
     parser.add_argument(
         "--adc",
         dest="adc_values",
@@ -1940,7 +1941,7 @@ def main() -> None:
     args = parser.parse_args()
 
     root = tk.Tk()
-    app = EmulatorGUI(root)
+    app = EmulatorGUI(root, args.mcu)
 
     adc_pairs: list[tuple[int, int]] = []
     for spec in args.adc_values:

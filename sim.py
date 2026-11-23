@@ -23,7 +23,7 @@ class StepResult:
 
 
 # Re-exported for backward compatibility.
-__all__ = ["ATmega2560Emulator", "StepResult", "DisassemblyLine"]
+__all__ = ["ATmega2560Emulator", "ATmega1280Emulator", "EMULATORS", "create_emulator", "StepResult", "DisassemblyLine"]
 
 
 class ATmega2560Emulator(
@@ -1403,6 +1403,35 @@ class ATmega2560Emulator(
             self.step()
             steps += 1
         return steps
+
+
+class ATmega1280Emulator(ATmega2560Emulator):
+    """ATmega1280: the ATmega2560 core and peripherals with 128 KiB of flash.
+
+    The 64K-word flash needs only a 16-bit PC, so CALL/RCALL/ICALL and interrupt
+    entry push 2-byte return addresses. The ATmega1280 has no EIND register
+    or EICALL/EIJMP.
+    """
+
+    FLASH_SIZE_BYTES = 128 * 1024
+    FLASH_SIZE_WORDS = FLASH_SIZE_BYTES // 2
+    PC_WORD_MASK = FLASH_SIZE_WORDS - 1
+
+
+EMULATORS = {
+    "atmega2560": ATmega2560Emulator,
+    "atmega1280": ATmega1280Emulator,
+}
+
+
+def create_emulator(mcu: str = "atmega2560") -> ATmega2560Emulator:
+    """Return an emulator for MCU name 'atmega2560' / 'atmega1280' (or '2560' / '1280')."""
+    key = mcu.lower()
+    if not key.startswith("atmega"):
+        key = "atmega" + key
+    if key not in EMULATORS:
+        raise ValueError(f"Unknown MCU '{mcu}', expected one of: {', '.join(EMULATORS)}")
+    return EMULATORS[key]()
 
 
 if __name__ == "__main__":
