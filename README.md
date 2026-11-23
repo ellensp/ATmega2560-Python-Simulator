@@ -102,6 +102,7 @@ pypy3 -m venv .venv-pypy310
 - `examples/eeprom_rw/eeprom_rw.c`: writes/reads EEPROM byte `0x0010` and prints value over `USART0`
 - `examples/uart_relay/uart_relay.c`: announces `uart N ready` on all UARTs; any full line received on one UART is broadcast to the other three as `Uart N sent: "..."`
 - `examples/uart0_rx_isr/uart0_rx_isr.c`: enables `USART0_RX_vect` and prints `received {...}` for each byte received on `USART0`
+- `examples/hwcheck/`: instruction, interrupt and timer checks whose output is compared with a real ATmega2560 (see section 11)
 - `examples/Marlin/firmware.hex` (final firmware only): prebuilt Marlin final firmware image for large real-world emulator runs (paired with `examples/Marlin/firmware.elf` for symbols/disassembly labels)
 
 Build example firmware:
@@ -359,7 +360,7 @@ The two differ in program counter width, which changes the stack and the timing 
 | `RCALL`, `ICALL` | 3 cycles | 4 cycles |
 | `EICALL` | — | 4 cycles |
 | `RET`, `RETI` | 4 cycles | 5 cycles |
-| Interrupt entry | 4 cycles | 5 cycles |
+| Interrupt entry | 4 cycles | 4 cycles |
 
 ## 10) `sim_probe.py` and `probe_agent.py`
 
@@ -387,6 +388,20 @@ Agent interface (one JSON request per line over TCP; commands are listed in the 
 printf '%s\n' '{"cmd":"load","hex":"fw.hex","mcu":"atmega1280"}' '{"cmd":"run","ms":3000}' '{"cmd":"lcd"}' | nc 127.0.0.1 9100
 ```
 
+## 11) Timing model and hardware comparison
+
+The timing below was measured on a real ATmega2560 (Arduino Mega 2560 R3) with `examples/hwcheck`, and `tests/test_hwcheck.py` keeps the simulator in step with that chip's recorded output:
+
+- An I/O register write takes effect at the end of its instruction. A read samples at the start of the instruction's last cycle.
+- An interrupt is taken at the end of an instruction if it was already pending and enabled one cycle before that end, and the entry takes 4 cycles. So `SEI`, `RETI` and unmasking let one more instruction run first, and a flag set in the last cycle of an instruction waits for the next one.
+- Interrupts are served in vector order (Timer2, Timer1, Timer0, SPI, USART0, ... USART3). TXC, ADIF and SPIF are cleared when their vector is entered.
+- A timer compare flag is set on the timer clock after the match, so a CTC period is OCR + 1 clocks.
+- 16-bit timer registers go through the timer's TEMP high byte: write high then low, read low then high.
+- `SBI` / `CBI` on PINx or on an interrupt flag register (TIFR0-5, EIFR, PCIFR) act on the named bit only.
+- An SPI byte takes 8 SCK periods plus 2 cycles.
+
+See `examples/hwcheck/README.md` to run the comparison on a board.
+
 ## Running Tests
 
 Run full suite:
@@ -394,8 +409,6 @@ Run full suite:
 ```bash
 .venv-pypy310/bin/python -m unittest discover -s tests -v
 ```
-
-Three tests fail and are known: `test_hex_loader.test_load_data_and_eof` (the loader pads the image to full flash; the test expects 2 words) and `test_opcode_tester` matrix cases 41 and 42 (JMP to 0x12345 lands at 0x14500).
 
 For detailed test docs, see:
 
