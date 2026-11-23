@@ -1,6 +1,6 @@
 # Test Suite Documentation
 
-This directory contains unit and integration tests for the ATmega2560 Python simulator.
+This directory contains unit and integration tests for the ATmega2560 / ATmega1280 Python simulator.
 
 The simulator is now organized as a small set of top-level modules composed by `sim.py`:
 
@@ -65,6 +65,7 @@ Run one specific test method:
 
 - `test_adc.py`: ADC controller behavior (`ADMUX`, `ADCSRA`, `ADCSRB`, result registers, conversion and interrupt behavior).
 - `test_analog_comparator.py`: Analog comparator behavior (`ACSR`), flag/interrupt behavior, and Timer1 capture routing baseline.
+- `test_atmega1280.py`: ATmega1280 model and `create_emulator`; 2-byte return addresses, and call/return/interrupt cycle counts on both MCUs (16-bit vs 22-bit PC).
 - `test_core_invariants.py`: Emulator core invariants and sanity checks.
 - `test_cycles.py`: AVR instruction cycle-count behavior checks.
 - `test_eeprom.py`: EEPROM controller register behavior, read/write gating windows, completion, and ready interrupt behavior.

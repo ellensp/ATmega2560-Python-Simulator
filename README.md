@@ -1,6 +1,6 @@
 # ATmega2560 Python Simulator
 
-Python emulator for ATmega2560-class firmware with instruction execution, peripheral models, and test tooling.
+Python emulator for ATmega2560 and ATmega1280 firmware with instruction execution, peripheral models, a logic probe with an HD44780 LCD decoder, and test tooling.
 
 Disclaimer: this project is experimental and a work in progress. AI tools were used in parts of its generation and ongoing development.
 
@@ -22,6 +22,8 @@ This README documents the main top-level entry points plus the simulator support
 - `opcode_tester.py`
 - `hex_loader.py`
 - `avr_encoding.py`
+- `sim_probe.py`
+- `probe_agent.py`
 
 ## Setup
 
@@ -159,6 +161,12 @@ Inject data into UART RX before run:
 .venv-pypy310/bin/python run_hex.py examples/blink/blink.hex --inject-file ./payload.bin --steps 200000
 ```
 
+Run an ATmega1280 image (default is `--mcu atmega2560`):
+
+```bash
+.venv-pypy310/bin/python run_hex.py firmware.hex --mcu atmega1280 --steps 100000
+```
+
 Show all options:
 
 ```bash
@@ -191,6 +199,12 @@ Short form is also accepted:
 
 ```bash
 .venv-pypy310/bin/python gui.py --load examples/adc_poll/adc_poll.hex --adc 0=512,ADC3=900,7=1023
+```
+
+Emulate an ATmega1280 instead of the default ATmega2560:
+
+```bash
+.venv-pypy310/bin/python gui.py --load firmware.hex --mcu atmega1280
 ```
 
 `--adc` may be repeated, accepts `0..15` or `ADC0..ADC15`, and each occurrence may contain one or more comma-separated assignments. The slider value is stored even if that channel is currently disabled; the emulator starts using it automatically when ADC/pin mode allows it.
@@ -233,7 +247,7 @@ Show all options:
 
 ## 4) `sim.py`
 
-Primary emulator entry point. It exports `ATmega2560Emulator`, `StepResult`, and `DisassemblyLine`, and composes the simulator from smaller logical modules.
+Primary emulator entry point. It exports `ATmega2560Emulator`, `ATmega1280Emulator`, `create_emulator`, `EMULATORS`, `StepResult`, and `DisassemblyLine`, and composes the simulator from smaller logical modules.
 
 Current simulator module layout:
 
@@ -268,6 +282,8 @@ for _ in range(1000):
 print(emu.pc, emu.cycles)
 ```
 
+`create_emulator("atmega1280")` (or `"1280"`) returns the emulator for an MCU name.
+
 ## 5) `hex_loader.py`
 
 Intel HEX parsing utilities used by the emulator.
@@ -287,7 +303,7 @@ print(len(image))
 
 Notes:
 
-- Supports HEX record types `00` (data), `01` (EOF), `04` (extended linear address)
+- Supports HEX record types `00` (data), `01` (EOF), `02` (extended segment address), `04` (extended linear address); start address records `03` and `05` are ignored
 - Raises `ValueError` for malformed/unsupported records
 
 ## 6) `avr_encoding.py`
@@ -330,6 +346,47 @@ from sim_peripherals import UART0
 uart = UART0()
 ```
 
+## 9) ATmega1280
+
+`ATmega1280Emulator` (in `sim.py`) is the ATmega2560 model with 128 KiB of flash. Select it with `--mcu atmega1280` in `run_hex.py`, `gui.py` and `probe_agent.py`, or `create_emulator("atmega1280")` from Python.
+
+The two differ in program counter width, which changes the stack and the timing of calls, returns and interrupts:
+
+| | ATmega1280 (16-bit PC) | ATmega2560 (22-bit PC) |
+|---|---|---|
+| Return address on the stack | 2 bytes | 3 bytes |
+| `CALL` | 4 cycles | 5 cycles |
+| `RCALL`, `ICALL` | 3 cycles | 4 cycles |
+| `EICALL` | — | 4 cycles |
+| `RET`, `RETI` | 4 cycles | 5 cycles |
+| Interrupt entry | 4 cycles | 5 cycles |
+
+## 10) `sim_probe.py` and `probe_agent.py`
+
+A logic probe and LCD protocol decoder:
+
+- `PinProbe` records every level change of chosen pins (or of every port pin) with its CPU cycle.
+- `ShiftRegisterDecoder` turns data/clock/latch pins into 74HC595 outputs and checks its timing.
+- `HD44780Decoder` runs a 4-bit HD44780 from those outputs, renders the screen and checks the datasheet bus, execution and initialization timings.
+- `LCD_PRESETS["mightyboard_revg"]` is the MakerBot MightyBoard Rev G/H (Replicator 2/2X) interface board, including the input levels the board puts on the MCU (interface detect and buttons).
+
+One run with a JSON report (screen, timing minimums and violations, init sequence):
+
+```bash
+.venv-pypy310/bin/python probe_agent.py run firmware.hex --mcu atmega1280 --ms 3000 --out report.json
+```
+
+`--lcd` picks the preset (default `mightyboard_revg`, `''` for none), `--until-text` stops once the LCD shows that text, and `--log N` adds the first N decoded LCD instructions to the report. The screen reads `(LCD not powered)` until the firmware switches the panel's power pin on, so run long enough for the firmware to get there.
+
+`--all-pins` probes every pin of every port and adds edge counts per pin, to see which port bits a firmware really drives.
+
+Agent interface (one JSON request per line over TCP; commands are listed in the `probe_agent.py` docstring):
+
+```bash
+.venv-pypy310/bin/python probe_agent.py serve --port 9100
+printf '%s\n' '{"cmd":"load","hex":"fw.hex","mcu":"atmega1280"}' '{"cmd":"run","ms":3000}' '{"cmd":"lcd"}' | nc 127.0.0.1 9100
+```
+
 ## Running Tests
 
 Run full suite:
@@ -337,6 +394,8 @@ Run full suite:
 ```bash
 .venv-pypy310/bin/python -m unittest discover -s tests -v
 ```
+
+Three tests fail and are known: `test_hex_loader.test_load_data_and_eof` (the loader pads the image to full flash; the test expects 2 words) and `test_opcode_tester` matrix cases 41 and 42 (JMP to 0x12345 lands at 0x14500).
 
 For detailed test docs, see:
 
