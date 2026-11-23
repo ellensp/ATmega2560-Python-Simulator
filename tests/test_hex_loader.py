@@ -24,7 +24,10 @@ class TestHexLoader(unittest.TestCase):
 
         emu = ATmega2560Emulator()
         emu.load_program_hex(path)
-        self.assertEqual(emu.program, [0xE005, 0xE013])
+        # load_program_hex pads the image to the full flash with 0xFFFF (erased flash).
+        self.assertEqual(emu.program[:2], [0xE005, 0xE013])
+        self.assertEqual(len(emu.program), emu.FLASH_SIZE_WORDS)
+        self.assertEqual(emu.program[2], 0xFFFF)
 
         Path(path).unlink(missing_ok=True)
 

@@ -558,7 +558,7 @@ class TestOpcodeTesterMatrix(unittest.TestCase):
             OpcodeTestCase(
                 program_words=[0x9508],  # RET
                 init_sp=0x0200,
-                init_data={0x0200: 0x01, 0x0201: 0x23, 0x0202: 0x45},
+                init_data={0x0201: 0x01, 0x0202: 0x23, 0x0203: 0x45},  # RET pops from SP+1
                 expect_pc=0x12345,
                 expect_sp=0x0203,
                 expect_cycles=5,
@@ -566,7 +566,7 @@ class TestOpcodeTesterMatrix(unittest.TestCase):
             OpcodeTestCase(
                 program_words=[0x9518],  # RETI
                 init_sp=0x0100,
-                init_data={0x0100: 0x01, 0x0101: 0x23, 0x0102: 0x45},
+                init_data={0x0101: 0x01, 0x0102: 0x23, 0x0103: 0x45},  # RETI pops from SP+1
                 expect_pc=0x12345,
                 expect_sp=0x0103,
                 expect_flags={"I": 1},
