@@ -137,7 +137,7 @@ class TestCoreInvariants(unittest.TestCase):
         self.assertEqual(emu.pc, target_pc)
 
         step2 = emu.step()  # RET back to low page return location
-        self.assertEqual(step2.cycles, 4)
+        self.assertEqual(step2.cycles, 5)
         self.assertEqual(emu.pc, 1)
 
         step3 = emu.step()  # Continue at return location
@@ -160,11 +160,11 @@ class TestCoreInvariants(unittest.TestCase):
         emu.pc = high_pc
 
         step1 = emu.step()
-        self.assertEqual(step1.cycles, 3)
+        self.assertEqual(step1.cycles, 4)
         self.assertEqual(emu.pc, high_pc + 2)
 
         step2 = emu.step()
-        self.assertEqual(step2.cycles, 4)
+        self.assertEqual(step2.cycles, 5)
         self.assertEqual(emu.pc, high_pc + 1)
 
         step3 = emu.step()

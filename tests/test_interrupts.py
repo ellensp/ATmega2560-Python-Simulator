@@ -16,7 +16,7 @@ class TestInterrupts(unittest.TestCase):
         emu.step()
 
         self.assertEqual(emu.pc, emu.VECTOR_TIMER0_OVF)
-        self.assertEqual(emu.cycles, 5)  # 1 cycle NOP + 4 cycle interrupt latency
+        self.assertEqual(emu.cycles, 6)  # 1 cycle NOP + 5 cycle interrupt latency (3-byte PC push)
         self.assertEqual(emu.sp, 0x21FC)
         self.assertEqual(emu.data[0x21FF], 0x01)  # return PC low byte
         self.assertEqual(emu.data[0x21FE], 0x00)  # return PC middle byte

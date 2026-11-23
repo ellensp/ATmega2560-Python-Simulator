@@ -100,8 +100,8 @@ class TestAVRCycleCounts(unittest.TestCase):
             0x0000,     # return location
             0x9508,     # RET target
         ]
-        self.assertEqual(self.step_cycles(program, step_index=0), 3)
-        self.assertEqual(self.step_cycles(program, step_index=1), 4)
+        self.assertEqual(self.step_cycles(program, step_index=0), 4)
+        self.assertEqual(self.step_cycles(program, step_index=1), 5)
 
     def test_lds_sts_cycles(self) -> None:
         program = [
@@ -119,7 +119,7 @@ class TestAVRCycleCounts(unittest.TestCase):
             0x0000,
             0x9508,
         ]
-        self.assertEqual(self.step_cycles(call_program, step_index=0), 4)
+        self.assertEqual(self.step_cycles(call_program, step_index=0), 5)
 
         jmp_program = [
             *jmp(2),
@@ -240,7 +240,7 @@ class TestAVRCycleCounts(unittest.TestCase):
         emu.load_program_words(icall_program)
         emu.reg[30] = 0x01
         emu.reg[31] = 0x00
-        self.assertEqual(emu.step().cycles, 3)
+        self.assertEqual(emu.step().cycles, 4)
 
         eijmp_program = [0x9419]
         emu = ATmega2560Emulator()

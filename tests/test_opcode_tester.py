@@ -561,7 +561,7 @@ class TestOpcodeTesterMatrix(unittest.TestCase):
                 init_data={0x0200: 0x01, 0x0201: 0x23, 0x0202: 0x45},
                 expect_pc=0x12345,
                 expect_sp=0x0203,
-                expect_cycles=4,
+                expect_cycles=5,
             ),
             OpcodeTestCase(
                 program_words=[0x9518],  # RETI
@@ -570,7 +570,7 @@ class TestOpcodeTesterMatrix(unittest.TestCase):
                 expect_pc=0x12345,
                 expect_sp=0x0103,
                 expect_flags={"I": 1},
-                expect_cycles=4,
+                expect_cycles=5,
             ),
             OpcodeTestCase(
                 program_words=[0x9598, ldi(16, 0xAA)],  # BREAK
@@ -594,7 +594,7 @@ class TestOpcodeTesterMatrix(unittest.TestCase):
                 expect_regs={16: 0x11},
                 expect_sp=0x21FF,
                 expect_pc=2,
-                expect_cycles=9,
+                expect_cycles=11,
             ),
             OpcodeTestCase(
                 # RCALL -> target at 2 -> RET -> continue at 1
@@ -603,7 +603,7 @@ class TestOpcodeTesterMatrix(unittest.TestCase):
                 expect_regs={16: 0x11},
                 expect_sp=0x21FF,
                 expect_pc=2,
-                expect_cycles=9,
+                expect_cycles=11,
             ),
             OpcodeTestCase(
                 program_words=[*jmp(0x001234)],
@@ -616,7 +616,7 @@ class TestOpcodeTesterMatrix(unittest.TestCase):
                 steps=1,
                 expect_pc=0x0222,
                 expect_sp=0x21FC,
-                expect_cycles=4,
+                expect_cycles=5,
             ),
             OpcodeTestCase(
                 program_words=[0x9419],  # EIJMP

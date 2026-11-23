@@ -59,6 +59,54 @@ class TestATmega1280(unittest.TestCase):
         self.assertEqual(emu.sp, 0x21FD)
         self.assertEqual(emu.data[0x21FF], 0x01)
         self.assertEqual(emu.data[0x21FE], 0x00)
+        self.assertEqual(emu.cycles, 5)  # 1 cycle NOP + 4 cycle interrupt latency
+
+
+class TestCallReturnCycles(unittest.TestCase):
+    """CALL/RCALL/ICALL/RET/RETI take one more cycle with a 22-bit PC (ATmega2560)."""
+
+    def cycles(self, cls, program: list[int], steps: int = 1, z: int = 0, sp: int | None = None) -> int:
+        emu = cls()
+        emu.load_program_words(program)
+        emu.reg[30] = z & 0xFF
+        emu.reg[31] = z >> 8
+        if sp is not None:
+            emu.sp = sp
+        result = None
+        for _ in range(steps):
+            result = emu.step()
+        assert result is not None
+        return result.cycles
+
+    def check(self, program: list[int], cycles_1280: int, cycles_2560: int, **kw) -> None:
+        self.assertEqual(self.cycles(ATmega1280Emulator, program, **kw), cycles_1280)
+        self.assertEqual(self.cycles(ATmega2560Emulator, program, **kw), cycles_2560)
+
+    def test_call(self) -> None:
+        self.check([*call(0x0100)], 4, 5)
+
+    def test_rcall(self) -> None:
+        self.check([0xD000], 3, 4)  # RCALL +0
+
+    def test_icall(self) -> None:
+        self.check([0x9509], 3, 4, z=1)
+
+    def test_ret(self) -> None:
+        self.check([0x9508], 4, 5, sp=0x0200)
+
+    def test_reti(self) -> None:
+        self.check([0x9518], 4, 5, sp=0x0200)
+
+    def test_interrupt_latency(self) -> None:
+        for cls, latency in ((ATmega1280Emulator, 4), (ATmega2560Emulator, 5)):
+            emu = cls()
+            emu.load_program_words([0x0000] * 64)
+            emu._set_flag(emu.FLAG_I, 1)
+            emu.data[0x20 + 0x25] = 0x01  # TCCR0B clk/1
+            emu.data[0x20 + 0x26] = 0xFF  # overflow on next tick
+            emu.data[0x006E] = 0x01       # TIMSK0 TOIE0
+            emu.step()
+            self.assertEqual(emu.cycles, 1 + latency, cls.__name__)
 
 
 if __name__ == "__main__":

@@ -208,5 +208,5 @@ class _InterruptsMixin:
         self._set_flag(self.FLAG_I, 0)
         self._push_return_address(self.pc)
         self.pc = vector
-        # AVR interrupt response latency baseline.
-        self.cycles += 4
+        # Interrupt response: 4 cycles, 5 with a 3-byte PC push (ATmega2560).
+        self.cycles += 4 + self.pc_extra_cycles

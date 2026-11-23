@@ -52,6 +52,10 @@ class ATmega2560Emulator(
         self.pc: int = 0  # Word-addressed program counter
         self.cycles: int = 0
         self.total_cycles: int = 0
+        # A 22-bit PC (more than 64K words of flash) pushes and pops a 3-byte return
+        # address, which costs one more cycle for CALL/RCALL/ICALL, RET/RETI and
+        # interrupt entry than on 16-bit PC devices.
+        self.pc_extra_cycles: int = 1 if self.PC_WORD_MASK > 0xFFFF else 0
         self.reset_count: int = 0
         self.watchdog_reset_count: int = 0
 
@@ -1108,7 +1112,7 @@ class ATmega2560Emulator(
             return_addr = self.pc
             self._push_return_address(return_addr)
             self.pc = self.pc + k
-            used_cycles = 3
+            used_cycles = 3 + self.pc_extra_cycles
             desc = f"RCALL {k:+d}"
 
         # JMP k: 1001 010k kkkk 110k + kkkk kkkk kkkk kkkk
@@ -1126,7 +1130,7 @@ class ATmega2560Emulator(
             return_addr = self.pc
             self._push_return_address(return_addr)
             self.pc = target
-            used_cycles = 4
+            used_cycles = 4 + self.pc_extra_cycles
             desc = f"CALL 0x{target:06X}"
 
         # IJMP: 1001 0100 0000 1001
@@ -1147,7 +1151,7 @@ class ATmega2560Emulator(
             return_addr = self.pc
             self._push_return_address(return_addr)
             self.pc = self._get_ptr("Z")
-            used_cycles = 3
+            used_cycles = 3 + self.pc_extra_cycles
             desc = "ICALL"
 
         # EICALL: 1001 0101 0001 1001
@@ -1176,14 +1180,14 @@ class ATmega2560Emulator(
         # RET: 1001 0101 0000 1000
         elif opcode == 0x9508:
             self.pc = self._pop_return_address()
-            used_cycles = 4
+            used_cycles = 4 + self.pc_extra_cycles
             desc = "RET"
 
         # RETI: 1001 0101 0001 1000
         elif opcode == 0x9518:
             self.pc = self._pop_return_address()
             self._set_flag(self.FLAG_I, 1)
-            used_cycles = 4
+            used_cycles = 4 + self.pc_extra_cycles
             desc = "RETI"
 
         # SLEEP: 1001 0101 1000 1000
