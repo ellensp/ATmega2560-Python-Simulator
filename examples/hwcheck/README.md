@@ -22,8 +22,10 @@ avrdude -p atmega2560 -c wiring -P /dev/ttyACM0 -b 115200 -D -U flash:w:hwcheck.
 Run in the simulator:
 
 ```bash
-.venv-pypy310/bin/python run_hex.py examples/hwcheck/hwcheck.hex --steps 900000
+.venv-pypy310/bin/python -m unittest tests.test_hwcheck
 ```
+
+The test runs the image with no TWI devices attached (`set_twi_devices([])`), like the bare board. `run_hex.py examples/hwcheck/hwcheck.hex --steps 6000000` prints the same lines, except that the two `twi*_addr_st` values read 18 because every address acknowledges by default.
 
 What the checks cover:
 
