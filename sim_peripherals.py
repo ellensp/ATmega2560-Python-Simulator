@@ -23,7 +23,14 @@ class _TimerBase:
     In the PWM modes a write to OCRnx goes to a buffer and reaches the compare
     register at BOTTOM (fast PWM, phase and frequency correct) or at TOP (phase
     correct); in the normal and CTC modes it takes effect at once (measured).
+
+    Compare outputs (OCnx): each channel keeps an output state that the COM bits
+    change on a compare match (and at BOTTOM in fast PWM). The change happens on
+    the timer clock after the match, with the compare flag, and the state is
+    kept while the output is disconnected (measured on OC0A and OC1C).
     """
+
+    CHANNELS = 2
 
     SHARED_PRESCALER = True
     EXTERNAL_CLOCK = True  # CS = 6 / 7 count falling / rising edges of the Tn pin
@@ -44,6 +51,9 @@ class _TimerBase:
         # Compare register values in use (A, B, C); data[] holds the OCR buffers.
         self._ocr_active = [0, 0, 0]
         self._was_pwm = False
+        # Compare output states (A, B, C) and the emulator's callback for a change.
+        self.oc_level = [0, 0, 0]
+        self.oc_changed = None  # callable(timer, cycle)
 
     def reset(self) -> None:
         self._prescaler_accum = 0
@@ -51,6 +61,7 @@ class _TimerBase:
         self._compare_block = False
         self._ocr_active = [0, 0, 0]
         self._was_pwm = False
+        self.oc_level = [0, 0, 0]
 
     def _ticks(self, cycles: int, div: int, prescaler: int | None) -> int:
         if div == 1:
@@ -76,11 +87,62 @@ class _TimerBase:
         if not self._is_pwm_mode(data):
             self._was_pwm = False
 
-    def external_edge(self, rising: bool, data: bytearray) -> None:
+    def external_edge(self, rising: bool, data: bytearray, now: int = 0) -> None:
         """An edge on the timer's Tn pin: one count if that edge is the clock source."""
         cs = self._clock_select(data)
         if self.EXTERNAL_CLOCK and ((cs == 7 and rising) or (cs == 6 and not rising)):
-            self._run_ticks(1, data)
+            self._run_ticks(1, data, now, 1)
+
+    def _first_tick_offset(self, div: int, prescaler: int | None) -> int:
+        """Cycles from the start of the span being advanced to its first timer clock."""
+        if div == 1:
+            return 1
+        if prescaler is None or not self.SHARED_PRESCALER:
+            return div - (self._prescaler_accum % div)
+        return div - (prescaler % div)
+
+    # (on a match counting up, on a match counting down, at the TOP -> BOTTOM wrap):
+    # "t" toggle, "c" clear, "s" set, None nothing. None instead of a tuple: disconnected.
+    _OC_NON_PWM = {1: ("t", "t", None), 2: ("c", "c", None), 3: ("s", "s", None)}
+    _OC_FAST = {2: ("c", "c", "s"), 3: ("s", "s", "c")}
+    _OC_PHASE = {2: ("c", "s", None), 3: ("s", "c", None)}
+
+    def _oc_rule(self, kind: str, com: int, toggle_allowed: bool):
+        if com == 0:
+            return None
+        if kind in ("normal", "ctc"):
+            return self._OC_NON_PWM[com]
+        if com == 1:
+            return ("t", "t", None) if toggle_allowed else None
+        return (self._OC_FAST if kind == "fast" else self._OC_PHASE)[com]
+
+    def oc_rules(self, data: bytearray) -> list:
+        """The compare-output rule of each channel for the current mode (None: disconnected)."""
+        raise NotImplementedError
+
+    def _oc_apply(self, channel: int, action: str | None, when: int) -> None:
+        if action is None:
+            return
+        old = self.oc_level[channel]
+        new = (old ^ 1) if action == "t" else (0 if action == "c" else 1)
+        if new != old:
+            self.oc_level[channel] = new
+            if self.oc_changed is not None:
+                self.oc_changed(self, when)
+
+    def _oc_force(self, channel: int, rule, high: bool, when: int) -> None:
+        """Phase-correct modes put a PWM output in the state it must have where the OCR
+        buffer is loaded, even without a compare match (measured). `high` is the
+        level of a non-inverting output there."""
+        if rule is not None and rule[0] != "t":
+            inverting = rule[0] == "s"
+            self._oc_apply(channel, "s" if high != inverting else "c", when)
+
+    def force_compare(self, channel: int, data: bytearray, when: int) -> None:
+        """FOCnx strobe: the compare action without the flag, outside the PWM modes."""
+        rule = self.oc_rules(data)[channel]
+        if rule is not None and not self._is_pwm_mode(data):
+            self._oc_apply(channel, rule[0], when)
 
 
 class _Timer8(_TimerBase):
@@ -105,17 +167,29 @@ class _Timer8(_TimerBase):
     def _is_pwm_mode(self, data: bytearray) -> bool:
         return (data[self._REGS[0]] & 0x01) != 0  # WGMn0 is set in every PWM mode
 
-    def advance(self, cycles: int, data: bytearray, prescaler: int | None = None) -> None:
+    def advance(self, cycles: int, data: bytearray, prescaler: int | None = None, now: int = 0) -> None:
         if cycles <= 0:
             return
         div = self._divisor(data)
         if div is None:
             return
+        first = self._first_tick_offset(div, prescaler)
         ticks = self._ticks(cycles, div, prescaler)
         if ticks:
-            self._run_ticks(ticks, data)
+            self._run_ticks(ticks, data, now + first, div)
 
-    def _run_ticks(self, ticks: int, data: bytearray) -> None:
+    def oc_rules(self, data: bytearray) -> list:
+        tccra, tccrb = self._REGS[0], self._REGS[1]
+        mode = (((data[tccrb] >> 3) & 1) << 2) | (data[tccra] & 0x03)
+        kind = "ctc" if mode == 0b010 else "fast" if mode in (0b011, 0b111) else "phase" if mode in (0b001, 0b101) else "normal"
+        a = data[tccra]
+        # COMnA = 1 in a PWM mode toggles OCnA only when OCRnA is TOP (WGMn2 set).
+        return [
+            self._oc_rule(kind, (a >> 6) & 3, mode in (0b101, 0b111)),
+            self._oc_rule(kind, (a >> 4) & 3, False),
+        ]
+
+    def _run_ticks(self, ticks: int, data: bytearray, when: int = 0, step: int = 1) -> None:
         tccra, tccrb, tcnt, ocra, ocrb, tifr = self._REGS
         mode = (((data[tccrb] >> 3) & 1) << 2) | (data[tccra] & 0x03)
         ctc = mode == 0b010
@@ -123,6 +197,8 @@ class _Timer8(_TimerBase):
         phase = mode in (0b001, 0b101)
         ocra_top = mode in (0b101, 0b111)
         pwm = fast or phase
+        rule_a, rule_b = self.oc_rules(data) if data[tccra] & 0xF0 else (None, None)
+        outputs = rule_a is not None or rule_b is not None
         active = self._ocr_active
         if not pwm or not self._was_pwm:
             active[0] = data[ocra]
@@ -135,21 +211,33 @@ class _Timer8(_TimerBase):
                 active[0] = data[ocra]
                 active[1] = data[ocrb]
             ocra_val = active[0]
+            top = ocra_val if ocra_top else 0xFF
+            if phase:
+                # The direction turns at BOTTOM and TOP before the compare outputs act,
+                # so OCR = TOP counts as a match on the way down.
+                if cur == 0:
+                    data[tifr] |= 0x01
+                    self._count_up = True
+                turned = self._count_up and cur >= top
+                if turned:
+                    self._count_up = False
             if self._compare_block:
                 self._compare_block = False
             else:
                 if cur == active[1]:
                     data[tifr] |= 0x04
+                    if rule_b is not None:
+                        self._oc_apply(1, rule_b[0 if self._count_up or not phase else 1], when)
                 if cur == ocra_val:
                     data[tifr] |= 0x02
-            top = ocra_val if ocra_top else 0xFF
+                    if rule_a is not None:
+                        self._oc_apply(0, rule_a[0 if self._count_up or not phase else 1], when)
 
             if phase:
-                if cur == 0:
-                    data[tifr] |= 0x01
-                    self._count_up = True
-                if self._count_up and cur >= top:
-                    self._count_up = False
+                if turned:
+                    if outputs:
+                        self._oc_force(0, rule_a, ocra_val >= top, when)
+                        self._oc_force(1, rule_b, active[1] >= top, when)
                     active[0] = data[ocra]  # OCR buffers are loaded at TOP
                     active[1] = data[ocrb]
                 if self._count_up:
@@ -162,6 +250,11 @@ class _Timer8(_TimerBase):
                 if cur >= top:
                     data[tcnt] = 0
                     data[tifr] |= 0x01
+                    if outputs:
+                        if rule_a is not None:
+                            self._oc_apply(0, rule_a[2], when)
+                        if rule_b is not None:
+                            self._oc_apply(1, rule_b[2], when)
                     active[0] = data[ocra]  # OCR buffers are loaded at BOTTOM
                     active[1] = data[ocrb]
                 else:
@@ -171,6 +264,7 @@ class _Timer8(_TimerBase):
                 data[tcnt] = nxt
                 if nxt == 0:
                     data[tifr] |= 0x01
+            when += step
 
 
 class _Timer16(_TimerBase):
@@ -184,6 +278,7 @@ class _Timer16(_TimerBase):
     """
 
     _N = 1
+    CHANNELS = 3
 
     # WGMn3:0 -> (counting, TOP, where the OCR buffers are loaded): TOP is a fixed
     # value, "ocra" or "icr".
@@ -221,15 +316,27 @@ class _Timer16(_TimerBase):
     def _clock_select(self, data: bytearray) -> int:
         return data[self._tccrb] & 0x7
 
-    def advance(self, cycles: int, data: bytearray, prescaler: int | None = None) -> None:
+    def advance(self, cycles: int, data: bytearray, prescaler: int | None = None, now: int = 0) -> None:
         if cycles <= 0:
             return
         div = self._PRESCALE.get(data[self._tccrb] & 0x7)
         if div is None:
             return
+        first = self._first_tick_offset(div, prescaler)
         ticks = self._ticks(cycles, div, prescaler)
         if ticks:
-            self._run_ticks(ticks, data)
+            self._run_ticks(ticks, data, now + first, div)
+
+    def oc_rules(self, data: bytearray) -> list:
+        wgm = (((data[self._tccrb] >> 3) & 0x3) << 2) | (data[self._tccra] & 0x3)
+        kind = self._MODES[wgm][0]
+        a = data[self._tccra]
+        # COMnA = 1 in a PWM mode toggles OCnA in modes 9, 11, 14 and 15 only.
+        return [
+            self._oc_rule(kind, (a >> 6) & 3, wgm in (9, 11, 14, 15)),
+            self._oc_rule(kind, (a >> 4) & 3, False),
+            self._oc_rule(kind, (a >> 2) & 3, False),
+        ]
 
     def _is_pwm_mode(self, data: bytearray) -> bool:
         return self._MODES[(((data[self._tccrb] >> 3) & 0x3) << 2) | (data[self._tccra] & 0x3)][2] is not None
@@ -241,8 +348,10 @@ class _Timer16(_TimerBase):
         active[1] = data[ocrb] | (data[ocrb + 1] << 8)
         active[2] = data[ocrc] | (data[ocrc + 1] << 8)
 
-    def _run_ticks(self, ticks: int, data: bytearray) -> None:
+    def _run_ticks(self, ticks: int, data: bytearray, when: int = 0, step: int = 1) -> None:
         kind, top_src, update = self._MODES[(((data[self._tccrb] >> 3) & 0x3) << 2) | (data[self._tccra] & 0x3)]
+        rules = self.oc_rules(data) if data[self._tccra] & 0xFC else None
+        phase = kind == "phase"
         tcnt = self._tcnt
         tifr = self._tifr
         icr = self._icr
@@ -258,65 +367,88 @@ class _Timer16(_TimerBase):
             if not pwm:
                 self._load_ocr(data)
             ocra_val = active[0]
-            if self._compare_block:
-                self._compare_block = False
-            else:
-                if cur == ocra_val:
-                    data[tifr] |= 0x02
-                if cur == active[1]:
-                    data[tifr] |= 0x04
-                if cur == active[2]:
-                    data[tifr] |= 0x08
-
-            if kind == "normal":
-                nxt = (cur + 1) & 0xFFFF
-                if nxt == 0:
-                    data[tifr] |= 0x01
-            else:
+            if kind != "normal":
                 if top_src == "ocra":
                     top = ocra_val
                 elif icr_top:
                     top = data[icr] | (data[icr + 1] << 8)
                 else:
                     top = top_src
-
-                if kind == "ctc":
-                    if cur == top:
-                        nxt = 0
-                        if icr_top:
-                            data[tifr] |= 0x20
-                    else:
-                        nxt = (cur + 1) & 0xFFFF
-                        if nxt == 0:
-                            data[tifr] |= 0x01
-                elif kind == "fast":
-                    if cur >= top:
-                        nxt = 0
-                        data[tifr] |= 0x01
-                        if icr_top:
-                            data[tifr] |= 0x20
+            turned = False
+            if phase:
+                # The direction turns at BOTTOM and TOP before the compare outputs act,
+                # so OCR = TOP counts as a match on the way down.
+                if cur == 0:
+                    data[tifr] |= 0x01
+                    self._count_up = True
+                    if update == "bottom":
                         self._load_ocr(data)
-                    else:
-                        nxt = cur + 1
-                else:  # phase-correct: up to TOP, down to BOTTOM
-                    if cur == 0:
+                        ocra_val = active[0]
+                        if rules is not None:
+                            for channel in (0, 1, 2):
+                                self._oc_force(channel, rules[channel], True, when)
+                turned = self._count_up and cur >= top
+                if turned:
+                    self._count_up = False
+                    if icr_top:
+                        data[tifr] |= 0x20
+            if self._compare_block:
+                self._compare_block = False
+            else:
+                direction = 0 if self._count_up or not phase else 1
+                if cur == ocra_val:
+                    data[tifr] |= 0x02
+                    if rules is not None and rules[0] is not None:
+                        self._oc_apply(0, rules[0][direction], when)
+                if cur == active[1]:
+                    data[tifr] |= 0x04
+                    if rules is not None and rules[1] is not None:
+                        self._oc_apply(1, rules[1][direction], when)
+                if cur == active[2]:
+                    data[tifr] |= 0x08
+                    if rules is not None and rules[2] is not None:
+                        self._oc_apply(2, rules[2][direction], when)
+
+            if kind == "normal":
+                nxt = (cur + 1) & 0xFFFF
+                if nxt == 0:
+                    data[tifr] |= 0x01
+            elif kind == "ctc":
+                if cur == top:
+                    nxt = 0
+                    if icr_top:
+                        data[tifr] |= 0x20
+                else:
+                    nxt = (cur + 1) & 0xFFFF
+                    if nxt == 0:
                         data[tifr] |= 0x01
-                        self._count_up = True
-                        if update == "bottom":
-                            self._load_ocr(data)
-                    if self._count_up and cur >= top:
-                        self._count_up = False
-                        if icr_top:
-                            data[tifr] |= 0x20
-                        if update == "top":
-                            self._load_ocr(data)
-                    if self._count_up:
-                        nxt = cur + 1
-                    else:
-                        nxt = cur - 1 if cur > 0 else 0
+            elif kind == "fast":
+                if cur >= top:
+                    nxt = 0
+                    data[tifr] |= 0x01
+                    if icr_top:
+                        data[tifr] |= 0x20
+                    if rules is not None:
+                        for channel in (0, 1, 2):
+                            if rules[channel] is not None:
+                                self._oc_apply(channel, rules[channel][2], when)
+                    self._load_ocr(data)
+                else:
+                    nxt = cur + 1
+            else:  # phase-correct: up to TOP, down to BOTTOM
+                if turned and update == "top":
+                    if rules is not None:
+                        for channel in (0, 1, 2):
+                            self._oc_force(channel, rules[channel], active[channel] >= top, when)
+                    self._load_ocr(data)
+                if self._count_up:
+                    nxt = cur + 1
+                else:
+                    nxt = cur - 1 if cur > 0 else 0
 
             data[tcnt] = nxt & 0xFF
             data[tcnt + 1] = (nxt >> 8) & 0xFF
+            when += step
 
 
 class Timer0(_Timer8):
@@ -410,8 +542,8 @@ class Timer2(_Timer8):
             div *= self._ASYNC_SCALE
         return div
 
-    def advance(self, cycles: int, data: bytearray, prescaler: int | None = None) -> None:
-        super().advance(cycles, data, None)
+    def advance(self, cycles: int, data: bytearray, prescaler: int | None = None, now: int = 0) -> None:
+        super().advance(cycles, data, None, now)
 
 
 class Timer3(_Timer16):

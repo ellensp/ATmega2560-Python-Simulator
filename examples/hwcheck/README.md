@@ -1,10 +1,10 @@
 # hwcheck: simulator against a real ATmega2560
 
-`hwcheck.hex` runs 162 small checks of instruction timing, interrupt behaviour, timers, sleep, EEPROM, SPI, USART, ADC, TWI and register access, and prints one `name=value` line (hex) per check on USART0 at 115200 baud. The same image runs on a real chip and in the simulator, so the two outputs can be compared line by line.
+`hwcheck.hex` runs 199 small checks of instruction timing, interrupt behaviour, timers, sleep, EEPROM, SPI, USART, ADC, TWI, compare outputs and register access, and prints one `name=value` line (hex) per check on USART0 at 115200 baud. The same image runs on a real chip and in the simulator, so the two outputs can be compared line by line.
 
 `atmega2560_hardware.txt` is the output of an Arduino Mega 2560 R3 (16 MHz). `tests/test_hwcheck.py` runs the image in the simulator and requires every value to match it.
 
-The firmware drives no pins as outputs except USART0 TX, and SDA/SCL (PD1/PD0) as a TWI master against the board's own pull-ups. It briefly enables pull-ups on PA0-PA2 and PB0. Leave all of those unconnected. Each run writes one EEPROM cell (the last one, 0x0FFF).
+The firmware drives USART0 TX, PB7 (the Arduino Mega's LED pin, for the compare-output waveforms), and SDA/SCL (PD1/PD0) as a TWI master against the board's own pull-ups. It briefly enables pull-ups on PA0-PA2 and PB0. Leave all of those unconnected. Each run writes one EEPROM cell (the last one, 0x0FFF).
 
 Build:
 
@@ -57,4 +57,7 @@ What the checks cover:
 | `tb4`, `tb15`, `tb11`, `tb9` | TCNT1L after OCR1A, used as TOP, is rewritten while running |
 | `adc1`, `adc2`, `adc_free` | cycles from the ADSC write to the ADC interrupt for 20 start phases (first and second conversion), and between free-running results |
 | `twi72_*`, `twi12_*` | cycles and TWSR for a START and for SLA+W with no device on the bus, at two bit rates |
+| `pinlat*` | PINB7 read after PORTB7 is written, with and without a NOP in between |
+| `oc_<mode>_<output>` | 48 samples of PB7, one per cycle after Timer1 starts, with OC1C in that mode (`n` normal, `c` CTC, `f` fast PWM, `p` phase correct, `q` phase and frequency correct; `t` toggle, `c` clear, `s` set, `n` non-inverting, `i` inverting; `0`/`T`: OCR1C at BOTTOM/TOP). The output state carries over from one run to the next, as on the chip. |
+| `oc0_*`, `oc_mod0/1`, `foc` | the same for OC0A; OC0A and OC1C together on PB7 with PORTB7 = 0 / 1; the FOC1C strobe |
 | `eere`, `eepe`, `eeread_val` | cycles of the EEPROM read and write strobes; the value read back |

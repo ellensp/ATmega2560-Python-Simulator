@@ -97,6 +97,25 @@ class ATmega2560Emulator(
         # toggles, and the interrupt flag registers are write-one-to-clear.
         self._bit_write_addrs = set(self.GPIO_PIN_ADDRS) | set(range(0x35, 0x3D))  # TIFR0-5, PCIFR, EIFR
         self._timers16 = {1: self.timer1, 3: self.timer3, 4: self.timer4, 5: self.timer5}
+        self._timers = {0: self.timer0, 1: self.timer1, 2: self.timer2, 3: self.timer3, 4: self.timer4, 5: self.timer5}
+        self._timer_number = {id(timer): n for n, timer in self._timers.items()}
+        for timer in self._timers.values():
+            timer.oc_changed = self._oc_changed
+        # Compare outputs connected to pins, per port: which bits and their levels.
+        self._oc_mask: dict[int, int] = {pin_addr: 0 for pin_addr in self.GPIO_PIN_ADDRS}
+        self._oc_value: dict[int, int] = {pin_addr: 0 for pin_addr in self.GPIO_PIN_ADDRS}
+        # A pin read sees the pin one cycle late: the level before the last output
+        # change, and the cycle of that change, per port.
+        self._pin_prev: dict[int, int] = {pin_addr: 0 for pin_addr in self.GPIO_PIN_ADDRS}
+        self._pin_change_at: dict[int, int] = {pin_addr: -2 for pin_addr in self.GPIO_PIN_ADDRS}
+        self._gpio_reg_to_pin = {}
+        for pin_addr, (ddr_addr, port_addr) in self.GPIO_PIN_ADDRS.items():
+            self._gpio_reg_to_pin[pin_addr] = pin_addr
+            self._gpio_reg_to_pin[ddr_addr] = pin_addr
+            self._gpio_reg_to_pin[port_addr] = pin_addr
+        self._pin_port_letter = {pin_addr: letter for letter, (pin_addr, _, _) in self.GPIO_PORTS.items()}
+        # Called as listener(port_letter, cycle) when a compare output changes a pin.
+        self.pin_listeners: list = []
         self._timer_by_tccr = {0x44: self.timer0, 0x45: self.timer0, 0xB0: self.timer2, 0xB1: self.timer2}
         for timer in self._timers16.values():
             self._timer_by_tccr[timer._tccra] = timer
@@ -253,6 +272,11 @@ class ATmega2560Emulator(
         self._ext_int_levels = [0] * 8
         self._ext_level_mask = 0
         self._timer_pin_levels = {n: 0 for n in self.TIMER_CLOCK_PINS}
+        for pin_addr in self._oc_mask:
+            self._oc_mask[pin_addr] = 0
+            self._oc_value[pin_addr] = 0
+            self._pin_prev[pin_addr] = 0
+            self._pin_change_at[pin_addr] = -2
         self._extint_dirty = True
         self._update_ext_int_flags()
         self._prescaler = 0
@@ -1451,6 +1475,62 @@ class ATmega2560Emulator(
                     self._perform_watchdog_reset()
         return StepResult(pc, 0x9588, 1, "SLEEP")
 
+    # -----------------------------
+    # Compare outputs (OCnx pins)
+    # -----------------------------
+    def _oc_changed(self, timer, when: int) -> None:
+        """A timer's compare output changed, or its mode was written: update its pins."""
+        n = self._timer_number[id(timer)]
+        rules = timer.oc_rules(self.data)
+        ports = set()
+        for channel, rule in enumerate(rules):
+            pin_addr, bit = self.OC_PINS[(n, channel)]
+            mask = 1 << bit
+            if pin_addr == 0x23 and bit == 7:
+                # PB7 carries OC0A and OC1C: with both connected they are ORed when
+                # PORTB7 is 1 and ANDed when it is 0 (the output compare modulator).
+                a_on = self.timer0.oc_rules(self.data)[0] is not None
+                c_on = self.timer1.oc_rules(self.data)[2] is not None
+                a, c = self.timer0.oc_level[0], self.timer1.oc_level[2]
+                connected = a_on or c_on
+                if a_on and c_on:
+                    level = (a | c) if (self.data[0x25] >> 7) & 1 else (a & c)
+                else:
+                    level = a if a_on else c
+            else:
+                connected = rule is not None
+                level = timer.oc_level[channel]
+            new_mask = (self._oc_mask[pin_addr] & ~mask) | (mask if connected else 0)
+            new_value = (self._oc_value[pin_addr] & ~mask) | (mask if level else 0)
+            if new_mask != self._oc_mask[pin_addr] or new_value != self._oc_value[pin_addr]:
+                if pin_addr not in ports:
+                    self._pin_snapshot(pin_addr, when)
+                    ports.add(pin_addr)
+                self._oc_mask[pin_addr] = new_mask
+                self._oc_value[pin_addr] = new_value
+        for pin_addr in ports:
+            if pin_addr in self.PCINT_GROUP_PIN_ADDRS:
+                self._pcint_dirty = True
+            if pin_addr in (0x29, 0x2C, 0x100, 0x109):
+                self._extint_dirty = True
+            for listener in self.pin_listeners:
+                listener(self._pin_port_letter[pin_addr], when)
+
+    def _pin_snapshot(self, pin_addr: int, when: int) -> None:
+        """Remember a port's pin levels just before an output change at cycle `when`."""
+        if self._pin_change_at[pin_addr] != when:  # several changes in one cycle: keep the level before the first
+            self._pin_prev[pin_addr] = self._read_port_by_pin_addr(pin_addr)
+            self._pin_change_at[pin_addr] = when
+
+    def output_pin_level(self, port: str, bit: int) -> Optional[int]:
+        """Level the MCU drives on a pin (PORTx or a connected compare output); None if it is an input."""
+        pin_addr, ddr_addr, port_addr = self.GPIO_PORTS[port.upper()]
+        if not (self.data[ddr_addr] >> bit) & 1:
+            return None
+        if (self._oc_mask[pin_addr] >> bit) & 1:
+            return (self._oc_value[pin_addr] >> bit) & 1
+        return (self.data[port_addr] >> bit) & 1
+
     def _step_sync(self, offset: int) -> None:
         """Advance time to `offset` cycles into the instruction being executed."""
         delta = offset - self._step_pre
@@ -1478,12 +1558,13 @@ class ATmega2560Emulator(
         Returns the watchdog event for that span ("interrupt", "reset" or None).
         """
         prescaler = self._prescaler
-        self.timer0.advance(cycles, self.data, prescaler)
-        self.timer1.advance(cycles, self.data, prescaler)
-        self.timer2.advance(cycles, self.data)
-        self.timer3.advance(cycles, self.data, prescaler)
-        self.timer4.advance(cycles, self.data, prescaler)
-        self.timer5.advance(cycles, self.data, prescaler)
+        now = self.cycles
+        self.timer0.advance(cycles, self.data, prescaler, now)
+        self.timer1.advance(cycles, self.data, prescaler, now)
+        self.timer2.advance(cycles, self.data, None, now)
+        self.timer3.advance(cycles, self.data, prescaler, now)
+        self.timer4.advance(cycles, self.data, prescaler, now)
+        self.timer5.advance(cycles, self.data, prescaler, now)
         # The prescaler pauses while none of its timers has a clock selected.
         data = self.data
         if not self._prescaler_hold and ((data[0x45] | data[0x81] | data[0x91] | data[0xA1] | data[0x121]) & 0x07):

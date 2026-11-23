@@ -129,6 +129,17 @@ class _EmulatorConstants:
     # Mega's fuses (16K CK), and 6 cycles from the standby modes.
     SLEEP_WAKE_OSC_STARTUP_CYCLES = 16384
     SLEEP_WAKE_STANDBY_CYCLES = 6
+    # Compare output pins: (timer, channel) -> (PIN address, bit). OC0A and OC1C share PB7.
+    OC_PINS = {
+        (0, 0): (0x23, 7), (0, 1): (0x32, 5),
+        (1, 0): (0x23, 5), (1, 1): (0x23, 6), (1, 2): (0x23, 7),
+        (2, 0): (0x23, 4), (2, 1): (0x100, 6),
+        (3, 0): (0x2C, 3), (3, 1): (0x2C, 4), (3, 2): (0x2C, 5),
+        (4, 0): (0x100, 3), (4, 1): (0x100, 4), (4, 2): (0x100, 5),
+        (5, 0): (0x109, 3), (5, 1): (0x109, 4), (5, 2): (0x109, 5),
+    }
+    # FOCnx strobe registers: address -> (timer, bit of channel A); channels B, C follow below it.
+    FOC_REGS = {0x45: (0, 7), 0xB1: (2, 7), 0x82: (1, 7), 0x92: (3, 7), 0xA2: (4, 7), 0x122: (5, 7)}
     # Timer external clock inputs: timer -> (PIN address, bit) for T0, T1, T3, T4, T5.
     TIMER_CLOCK_PINS = {0: (0x29, 7), 1: (0x29, 6), 3: (0x2C, 6), 4: (0x100, 7), 5: (0x109, 2)}
     DATA_SREG = 0x005F

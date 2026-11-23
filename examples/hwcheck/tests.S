@@ -1501,3 +1501,280 @@ TWI_vect:
   sts TWCR, r24
   pop r24
   reti
+
+; ---- fifth batch: compare outputs on PB7 (OC0A / OC1C, the board's LED pin) ----
+
+; PINB7 read r24 (0..47) cycles after PORTB7 is set (PB7 driven as an output).
+.global t_pinlat
+t_pinlat:
+  ldi r30, pm_lo8(pl_end)
+  ldi r31, pm_hi8(pl_end)
+  sub r30, r24
+  sbc r31, r1
+  cbi IO(PORTB), 7
+  sbi IO(DDRB), 7
+  NOPS 4
+  sbi IO(PORTB), 7
+  ijmp
+  NOPS 48
+pl_end:
+  in r24, IO(PINB)
+  cbi IO(PORTB), 7
+  cbi IO(DDRB), 7
+  andi r24, 0x80
+  ret
+
+; OC1C on PB7. r24 = TCCR1A (COM1C and WGM bits), r22 = TCCR1B mode bits, r20 = TOP
+; (ICR1), r18 = OCR1C, r16 = cycles (0..47) from the start to the PINB read.
+; PORTB7 is 0 unless bit 7 of r16 is set.
+.global t_oc1c
+t_oc1c:
+  mov r19, r16
+  andi r19, 0x7F
+  ldi r30, pm_lo8(oc1_end)
+  ldi r31, pm_hi8(oc1_end)
+  sub r30, r19
+  sbc r31, r1
+  sts TCCR1B, r1
+  sts TCCR1A, r1
+  sts TIMSK1, r1
+  sts OCR1CH, r1
+  sts OCR1CL, r18
+  cbi IO(PORTB), 7
+  sbrc r16, 7
+  sbi IO(PORTB), 7
+  sbi IO(DDRB), 7
+  sts TCCR1A, r24
+  sts TCCR1B, r22
+  sts ICR1H, r1
+  sts ICR1L, r20
+  sts TCNT1H, r1
+  sts TCNT1L, r1
+  ori r22, 1
+  sts TCCR1B, r22
+  ijmp
+  NOPS 48
+oc1_end:
+  in r24, IO(PINB)
+  sts TCCR1B, r1
+  sts TCCR1A, r1
+  cbi IO(PORTB), 7
+  cbi IO(DDRB), 7
+  ldi r19, 0x2F
+  out IO(TIFR1), r19
+  andi r24, 0x80
+  ret
+
+; OC0A on PB7. r24 = TCCR0A, r22 = TCCR0B mode bits, r20 = OCR0A, r18 = cycles to the read.
+.global t_oc0a
+t_oc0a:
+  ldi r30, pm_lo8(oc0_end)
+  ldi r31, pm_hi8(oc0_end)
+  sub r30, r18
+  sbc r31, r1
+  out IO(TCCR0B), r1
+  out IO(TCCR0A), r1
+  out IO(OCR0A), r20
+  cbi IO(PORTB), 7
+  sbi IO(DDRB), 7
+  out IO(TCCR0A), r24
+  out IO(TCCR0B), r22
+  out IO(TCNT0), r1
+  ori r22, 1
+  out IO(TCCR0B), r22
+  ijmp
+  NOPS 48
+oc0_end:
+  in r24, IO(PINB)
+  out IO(TCCR0B), r1
+  out IO(TCCR0A), r1
+  cbi IO(DDRB), 7
+  ldi r19, 7
+  out IO(TIFR0), r19
+  andi r24, 0x80
+  ret
+
+; OC0A (CTC toggle, OCR0A = 5) and OC1C (CTC toggle, ICR1 = 20, OCR1C = 6) both on
+; PB7. r24 = PORTB7 level (selects how the two are combined), r22 = cycles to the read.
+.global t_ocmod
+t_ocmod:
+  ldi r30, pm_lo8(ocm_end)
+  ldi r31, pm_hi8(ocm_end)
+  sub r30, r22
+  sbc r31, r1
+  out IO(TCCR0B), r1
+  sts TCCR1B, r1
+  ldi r19, 5
+  out IO(OCR0A), r19
+  ldi r19, 6
+  sts OCR1CH, r1
+  sts OCR1CL, r19
+  cbi IO(PORTB), 7
+  sbrc r24, 0
+  sbi IO(PORTB), 7
+  sbi IO(DDRB), 7
+  ldi r19, 0x42
+  out IO(TCCR0A), r19
+  ldi r19, 0x04
+  sts TCCR1A, r19
+  ldi r19, 0x18
+  sts TCCR1B, r19
+  ldi r19, 20
+  sts ICR1H, r1
+  sts ICR1L, r19
+  sts TCNT1H, r1
+  sts TCNT1L, r1
+  out IO(TCNT0), r1
+  ldi r18, 1
+  ldi r19, 0x19
+  out IO(TCCR0B), r18
+  sts TCCR1B, r19
+  ijmp
+  NOPS 48
+ocm_end:
+  in r24, IO(PINB)
+  out IO(TCCR0B), r1
+  sts TCCR1B, r1
+  out IO(TCCR0A), r1
+  sts TCCR1A, r1
+  cbi IO(PORTB), 7
+  cbi IO(DDRB), 7
+  ldi r19, 7
+  out IO(TIFR0), r19
+  ldi r19, 0x2F
+  out IO(TIFR1), r19
+  andi r24, 0x80
+  ret
+
+; Force output compare: OC1C in normal mode, toggle. Returns PINB7 before, after one
+; FOC1C strobe and after a second one in bits 0, 1, 2; TIFR1 afterwards in bits 4-7.
+.global t_foc
+t_foc:
+  sts TCCR1B, r1
+  ldi r19, 0x04
+  sts TCCR1A, r19
+  cbi IO(PORTB), 7
+  sbi IO(DDRB), 7
+  ldi r19, 0x2F
+  out IO(TIFR1), r19
+  ldi r24, 0
+  NOPS 3
+  sbic IO(PINB), 7
+  ori r24, 1
+  ldi r19, 0x20
+  sts TCCR1C, r19
+  NOPS 3
+  sbic IO(PINB), 7
+  ori r24, 2
+  sts TCCR1C, r19
+  NOPS 3
+  sbic IO(PINB), 7
+  ori r24, 4
+  in r19, IO(TIFR1)
+  swap r19
+  andi r19, 0xF0
+  or r24, r19
+  lds r19, TCCR1C
+  sts ocr_res, r19
+  sts TCCR1A, r1
+  cbi IO(DDRB), 7
+  ret
+
+; Like t_pinlat, but PORTB7 is set with OUT (and r22 selects ST through a pointer).
+.global t_pinlat_out
+t_pinlat_out:
+  ldi r30, pm_lo8(plo_end)
+  ldi r31, pm_hi8(plo_end)
+  sub r30, r24
+  sbc r31, r1
+  ldi r19, 0x80
+  ldi r26, 0x25
+  ldi r27, 0x00
+  cbi IO(PORTB), 7
+  sbi IO(DDRB), 7
+  NOPS 4
+  sbrc r22, 0
+  rjmp 1f
+  out IO(PORTB), r19
+  ijmp
+1: st X, r19
+  ijmp
+  NOPS 48
+plo_end:
+  in r24, IO(PINB)
+  out IO(PORTB), r1
+  cbi IO(DDRB), 7
+  andi r24, 0x80
+  ret
+
+; PORTB7 cleared with CBI / OUT / ST after being high: same read sweep.
+.global t_pinlat_clr
+t_pinlat_clr:
+  ldi r30, pm_lo8(plc_end)
+  ldi r31, pm_hi8(plc_end)
+  sub r30, r24
+  sbc r31, r1
+  sbi IO(PORTB), 7
+  sbi IO(DDRB), 7
+  NOPS 4
+  cbi IO(PORTB), 7
+  ijmp
+  NOPS 48
+plc_end:
+  in r24, IO(PINB)
+  cbi IO(DDRB), 7
+  andi r24, 0x80
+  ret
+
+; PINB7 read straight after PORTB7 is set, with no instruction in between and with
+; one NOP: bit 0 OUT+IN, bit 1 OUT+NOP+IN, bit 2 SBI+IN, bit 3 SBI+NOP+IN,
+; bit 4 ST+IN, bit 5 ST+NOP+IN.
+.global t_pinlat2
+t_pinlat2:
+  ldi r24, 0
+  ldi r19, 0x80
+  ldi r26, 0x25
+  ldi r27, 0x00
+  sbi IO(DDRB), 7
+  out IO(PORTB), r1
+  NOPS 4
+  out IO(PORTB), r19
+  in r18, IO(PINB)
+  sbrc r18, 7
+  ori r24, 1
+  out IO(PORTB), r1
+  NOPS 4
+  out IO(PORTB), r19
+  nop
+  in r18, IO(PINB)
+  sbrc r18, 7
+  ori r24, 2
+  out IO(PORTB), r1
+  NOPS 4
+  sbi IO(PORTB), 7
+  in r18, IO(PINB)
+  sbrc r18, 7
+  ori r24, 4
+  out IO(PORTB), r1
+  NOPS 4
+  sbi IO(PORTB), 7
+  nop
+  in r18, IO(PINB)
+  sbrc r18, 7
+  ori r24, 8
+  out IO(PORTB), r1
+  NOPS 4
+  st X, r19
+  in r18, IO(PINB)
+  sbrc r18, 7
+  ori r24, 16
+  out IO(PORTB), r1
+  NOPS 4
+  st X, r19
+  nop
+  in r18, IO(PINB)
+  sbrc r18, 7
+  ori r24, 32
+  out IO(PORTB), r1
+  cbi IO(DDRB), 7
+  ret

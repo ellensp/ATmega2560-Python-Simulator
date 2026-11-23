@@ -66,6 +66,7 @@ Run one specific test method:
 - `test_adc.py`: ADC controller behavior (`ADMUX`, `ADCSRA`, `ADCSRB`, result registers, conversion and interrupt behavior).
 - `test_analog_comparator.py`: Analog comparator behavior (`ACSR`), flag/interrupt behavior, and Timer1 capture routing baseline.
 - `test_atmega1280.py`: ATmega1280 model and `create_emulator`; 2-byte return addresses, and call/return/interrupt cycle counts on both MCUs (16-bit vs 22-bit PC).
+- `test_compare_outputs.py`: OCnx pin waveforms in the CTC and PWM modes, FOC strobes, OC0A/OC1C on PB7, the one-cycle pin-read delay, PWM edges in the logic probe.
 - `test_core_invariants.py`: Emulator core invariants and sanity checks.
 - `test_cycles.py`: AVR instruction cycle-count behavior checks.
 - `test_eeprom.py`: EEPROM controller register behavior, read/write gating windows, completion, and ready interrupt behavior.
@@ -75,7 +76,7 @@ Run one specific test method:
 - `test_gpio.py`: GPIO read/write baseline behavior, pull-ups, toggle semantics, and external-drive release handling.
 - `test_gpio_altfunc.py`: Alternate-function pin ownership and waveform-level pin behavior (UART TX, SPI SCK/MOSI, TWI SDA/SCL).
 - `test_hex_loader.py`: Intel HEX loading and image mapping behavior.
-- `test_hwcheck.py`: runs `examples/hwcheck/hwcheck.hex` and compares all 162 values with the output of a real ATmega2560.
+- `test_hwcheck.py`: runs `examples/hwcheck/hwcheck.hex` and compares all 199 values with the output of a real ATmega2560.
 - `test_int0.py`: Focused `INT0` behavior tests.
 - `test_interrupts.py`: Generic ISR dispatch/priority and interrupt control flow tests.
 - `test_isr_firmware.py`: ISR-driven firmware integration-style patterns.

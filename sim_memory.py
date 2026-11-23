@@ -38,6 +38,10 @@ class _MemoryMixin:
 
         pin_level = self._read_port_by_pin_addr(addr)
         if pin_level is not None:
+            # The input synchroniser: a read sees the pin one cycle late, so an OUT to
+            # PORTx needs a NOP before IN PINx returns the new level (measured).
+            if self._step_pre is not None and self.cycles - self._pin_change_at[addr] < 1:
+                return self._pin_prev[addr]
             return pin_level
 
         if addr == self.DATA_SPL:
@@ -118,11 +122,29 @@ class _MemoryMixin:
             self.data[addr] = (value & 0x83) if tsm else 0
             return
 
+        foc = self.FOC_REGS.get(addr)
+        if foc is not None:
+            # FOCnx strobes read as zero and force the compare action of their channel.
+            n, top_bit = foc
+            timer = self._timers[n]
+            for channel in range(timer.CHANNELS):
+                if (value >> (top_bit - channel)) & 1:
+                    timer.force_compare(channel, self.data, self.cycles)
+            value &= ~(((1 << timer.CHANNELS) - 1) << (top_bit + 1 - timer.CHANNELS)) & 0xFF
+
         timer = self._timer_by_tccr.get(addr)
         if timer is not None:
             self.data[addr] = value
             timer.mode_written(self.data)
+            self._oc_changed(timer, self.cycles)  # outputs may connect or disconnect
             return
+        if foc is not None:
+            self.data[addr] = value
+            return
+
+        pin_reg = self._gpio_reg_to_pin.get(addr)
+        if pin_reg is not None and self._step_pre is not None:
+            self._pin_snapshot(pin_reg, self.cycles)
 
         if addr == 0x46:
             self.timer0._compare_block = True
@@ -296,6 +318,8 @@ class _MemoryMixin:
             return
 
         self.data[addr] = value
+        if addr == 0x25 and (self._oc_mask[0x23] & 0x80):
+            self._oc_changed(self.timer0, self.cycles)
         if addr in self.PCINT_RELEVANT_DATA_ADDRS:
             self._pcint_dirty = True
 

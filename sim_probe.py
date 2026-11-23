@@ -68,9 +68,12 @@ class PinProbe:
             self.add_pin(name)
         self._orig_data_write = emu._data_write
         emu._data_write = self._data_write_hook  # instance attribute shadows the mixin method
+        emu.pin_listeners.append(self._on_pin_event)  # compare outputs (PWM) changing a pin
 
     def detach(self) -> None:
         self.emu.__dict__.pop("_data_write", None)
+        if self._on_pin_event in self.emu.pin_listeners:
+            self.emu.pin_listeners.remove(self._on_pin_event)
 
     def add_pin(self, name: str) -> str:
         port, bit = parse_pin(name)
@@ -86,10 +89,7 @@ class PinProbe:
         return label
 
     def _pin_level(self, port: str, bit: int) -> Level:
-        _, ddr_addr, port_addr = self.emu.GPIO_PORTS[port]
-        if not (self.emu.data[ddr_addr] >> bit) & 1:
-            return None
-        return (self.emu.data[port_addr] >> bit) & 1
+        return self.emu.output_pin_level(port, bit)
 
     def add_all_pins(self) -> None:
         """Probe every pin of every GPIO port."""
@@ -113,9 +113,12 @@ class PinProbe:
     def _data_write_hook(self, addr: int, value: int, *args) -> None:
         self._orig_data_write(addr, value, *args)
         port = self._addr_to_port.get(addr & 0xFFFF)
-        if port is None:
+        if port is not None:
+            self._on_pin_event(port, self.emu.cycles)
+
+    def _on_pin_event(self, port: str, cycle: int) -> None:
+        if port not in self._watch:
             return
-        cycle = self.emu.cycles
         for bit in self._watch[port]:
             label = pin_label(port, bit)
             lvl = self._pin_level(port, bit)

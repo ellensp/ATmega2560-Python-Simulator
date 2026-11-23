@@ -38,6 +38,10 @@ class _GpioMixin:
         floating_mask = (~driven_mask) & 0xFF
         input_pullups = port & (~ddr & 0xFF)
         input_levels = driven_levels | (input_pullups & floating_mask)
+        # A connected compare output replaces PORTx on a pin configured as an output.
+        oc_mask = self._oc_mask[pin_addr]
+        if oc_mask:
+            port = (port & ~oc_mask) | (self._oc_value[pin_addr] & oc_mask)
         value = ((port & ddr) | (input_levels & (~ddr & 0xFF))) & 0xFF
         override_mask = self._gpio_output_override_masks[pin_addr] & 0xFF
         override_value = self._gpio_output_override_values[pin_addr] & 0xFF
@@ -230,7 +234,7 @@ class _GpioMixin:
             level = ((self._read_port_by_pin_addr(pin_addr) or 0) >> bit) & 1
             if level != self._timer_pin_levels[n]:
                 self._timer_pin_levels[n] = level
-                (self.timer0 if n == 0 else self._timers16[n]).external_edge(bool(level), self.data)
+                (self.timer0 if n == 0 else self._timers16[n]).external_edge(bool(level), self.data, self.cycles)
 
     def set_pin_level(self, port: str, bit: int, level: int) -> None:
         """Drive a simulated external logic level onto a GPIO input pin."""

@@ -18,6 +18,8 @@ extern uint16_t twi_time[2];
 void t_ocrbuf(uint8_t a, uint8_t b, uint8_t top), t_twi(uint8_t twbr);
 uint8_t t_topbuf(uint8_t a, uint8_t b), t_ocrbuf0(uint8_t a, uint8_t b);
 uint16_t t_adc_time(uint8_t d, uint8_t second), t_adc_free(void);
+uint8_t t_pinlat(uint8_t k), t_oc1c(uint8_t a, uint8_t b, uint8_t top, uint8_t ocr, uint8_t j), t_oc0a(uint8_t a, uint8_t b, uint8_t ocr, uint8_t j);
+uint8_t t_ocmod(uint8_t portb7, uint8_t j), t_foc(void), t_pinlat_out(uint8_t k, uint8_t st), t_pinlat_clr(uint8_t k), t_pinlat2(void);
 uint8_t t_irq_lat2(uint8_t ocr), t_irq_lat3(uint8_t ocr);
 uint8_t t_start_read1(void), t_start_read0(void), t_irq_sei(void), t_irq_mask(void), t_adif(void), t_spif(void), t_txc(void);
 extern uint8_t ord_t0, ord_t1, ord_t2;
@@ -77,6 +79,23 @@ static void ocrbuf(const char *name, uint8_t a, uint8_t b, uint8_t top) {
   named(name, '3', ocr_res[2]);
 }
 
+// 48 samples of PB7, one per cycle after the timer start, as 12 hex digits (first sample = top bit).
+static void wave_bits(const char *name, uint8_t bits[6]) {
+  puts_(name); put('=');
+  for (uint8_t i = 0; i < 6; i++) hex(bits[i]);
+  put('\r'); put('\n');
+}
+static void oc1c(const char *name, uint8_t a, uint8_t b, uint8_t top, uint8_t ocr, uint8_t portb7) {
+  uint8_t bits[6] = {0};
+  for (uint8_t j = 0; j < 48; j++) if (t_oc1c(a, b, top, ocr, j | (portb7 ? 0x80 : 0))) bits[j >> 3] |= 0x80 >> (j & 7);
+  wave_bits(name, bits);
+}
+static void oc0a(const char *name, uint8_t a, uint8_t b, uint8_t ocr) {
+  uint8_t bits[6] = {0};
+  for (uint8_t j = 0; j < 48; j++) if (t_oc0a(a, b, ocr, j)) bits[j >> 3] |= 0x80 >> (j & 7);
+  wave_bits(name, bits);
+}
+
 int main(void) {
   cli();
   UCSR0A = _BV(U2X0);
@@ -84,7 +103,7 @@ int main(void) {
   UCSR0B = _BV(TXEN0);
   UCSR0C = _BV(UCSZ01) | _BV(UCSZ00);
 
-  puts_("HWCHECK 10\r\n");
+  puts_("HWCHECK 11\r\n");
   uint8_t base = t_base();
   line("base", base);
   line("nop", t_nop() - base);
@@ -181,6 +200,42 @@ int main(void) {
   line16("twi72_addr", twi_time[1]); line("twi72_addr_st", twi_status[1]);
   t_twi(12);
   line16("twi12_start", twi_time[0]); line16("twi12_addr", twi_time[1]);
+  { uint8_t bits[6] = {0}; for (uint8_t j = 0; j < 8; j++) if (t_pinlat(j)) bits[0] |= 0x80 >> j; line("pinlat", bits[0]); }
+  { uint8_t b = 0; for (uint8_t j = 0; j < 8; j++) if (t_pinlat_out(j, 0)) b |= 0x80 >> j; line("pinlat_out", b); }
+  { uint8_t b = 0; for (uint8_t j = 0; j < 8; j++) if (t_pinlat_out(j, 1)) b |= 0x80 >> j; line("pinlat_st", b); }
+  { uint8_t b = 0; for (uint8_t j = 0; j < 8; j++) if (t_pinlat_clr(j)) b |= 0x80 >> j; line("pinlat_clr", b); }
+  line("pinlat2", t_pinlat2());
+  oc1c("oc_n_t", 0x04, 0x00, 20, 6, 0);     // normal, toggle
+  oc1c("oc_c_t", 0x04, 0x18, 20, 6, 0);     // CTC (TOP = ICR1), toggle
+  oc1c("oc_c_c", 0x08, 0x18, 20, 6, 1);     // CTC, clear (PORTB7 = 1 has no effect while connected)
+  oc1c("oc_c_s", 0x0C, 0x18, 20, 6, 0);     // CTC, set
+  oc1c("oc_f_n", 0x0A, 0x18, 20, 6, 0);     // fast PWM, non-inverting
+  oc1c("oc_f_i", 0x0E, 0x18, 20, 6, 0);     // fast PWM, inverting
+  oc1c("oc_f_t", 0x06, 0x18, 20, 6, 1);     // fast PWM, COM1C = 1: disconnected (PORTB7 = 1 shows)
+  oc1c("oc_f_n0", 0x0A, 0x18, 20, 0, 0);    // OCR1C = BOTTOM
+  oc1c("oc_f_nT", 0x0A, 0x18, 20, 20, 0);   // OCR1C = TOP
+  oc1c("oc_f_i0", 0x0E, 0x18, 20, 0, 0);
+  oc1c("oc_f_iT", 0x0E, 0x18, 20, 20, 0);
+  oc1c("oc_p_n", 0x0A, 0x10, 20, 6, 0);     // phase correct, non-inverting
+  oc1c("oc_p_i", 0x0E, 0x10, 20, 6, 0);
+  oc1c("oc_p_n0", 0x0A, 0x10, 20, 0, 0);
+  oc1c("oc_p_nT", 0x0A, 0x10, 20, 20, 0);
+  oc1c("oc_q_n", 0x08, 0x10, 20, 6, 0);     // phase and frequency correct, non-inverting
+  oc1c("oc_p_nT2", 0x0A, 0x10, 20, 20, 0);  // leaves the output high
+  oc1c("oc_p_n2", 0x0A, 0x10, 20, 6, 0);    // phase correct again, starting high
+  oc1c("oc_q_nT", 0x08, 0x10, 20, 20, 0);
+  oc1c("oc_q_n3", 0x08, 0x10, 20, 3, 0);
+  oc1c("oc_q_nT2", 0x08, 0x10, 20, 20, 0);
+  oc1c("oc_q_n10", 0x08, 0x10, 20, 10, 0);
+  oc1c("oc_q_i", 0x0C, 0x10, 20, 6, 0);     // phase and frequency correct, inverting
+  oc1c("oc_q_n0", 0x08, 0x10, 20, 0, 0);
+  oc0a("oc0_n_t", 0x40, 0x00, 6);           // Timer0 normal, toggle
+  oc0a("oc0_c_t", 0x42, 0x00, 5);           // Timer0 CTC, toggle
+  oc0a("oc0_f_t", 0x43, 0x08, 5);           // Timer0 fast PWM with TOP = OCR0A, toggle
+  oc0a("oc0_p_t", 0x41, 0x08, 5);           // Timer0 phase correct with TOP = OCR0A, toggle
+  { uint8_t bits[6] = {0}; for (uint8_t j = 0; j < 48; j++) if (t_ocmod(0, j)) bits[j >> 3] |= 0x80 >> (j & 7); wave_bits("oc_mod0", bits); }
+  { uint8_t bits[6] = {0}; for (uint8_t j = 0; j < 48; j++) if (t_ocmod(1, j)) bits[j >> 3] |= 0x80 >> (j & 7); wave_bits("oc_mod1", bits); }
+  line("foc", t_foc()); line("foc_tccr1c", ocr_res[0]);
   line16("uart_udre_10", t_uart_udre(10));
   line16("uart_udre_23", t_uart_udre(23));
   // The EEPROM write is timed by an RC oscillator, so it comes last: nothing
